@@ -1,10 +1,11 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(python src/engine/game_engine.py)",
+      "Bash(find /c/Users/etmue/Desktop/Github/defererence/src -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))"
+    ],
     "additionalDirectories": [
       "c:\\Users\\etmue\\Desktop\\Github\\defererence\\src"
-    ],
-    "allow": [
-      "Bash(python src/engine/game_engine.py)"
     ]
   }
 }

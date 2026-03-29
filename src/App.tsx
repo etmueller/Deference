@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { getQuote, getTieQuote } from './quotes';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Trophy,
@@ -49,10 +50,13 @@ interface Player {
 type TurnPhase = 'START' | 'ACTION' | 'END_CHECK' | 'ROUND_OVER' | 'GAME_OVER' | 'VOTING';
 
 interface LogEntry {
+  id: number;
   text: string;
   type: 'PLAYER' | 'CPU' | 'SYSTEM';
   timestamp: number;
 }
+
+let logIdCounter = 0;
 
 type MessageType = 'info' | 'warning' | 'error' | 'success';
 
@@ -242,6 +246,9 @@ const CardView = ({ card, onClick, disabled, className = "", isHidden = false, s
   );
 };
 
+// Module-level guard — lives outside React's render cycle, immune to re-renders
+const cpuVotesThisPhase = new Set<number>();
+
 export default function App() {
   // --- State ---
   const [deck, setDeck] = useState<Card[]>([]);
@@ -267,11 +274,27 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [votes, setVotes] = useState<{ [playerId: number]: 'KEEP' | 'END' }>({});
+  const roundVoteTriggers = useRef<Set<number>>(new Set());
+  const [lastAction, setLastAction] = useState<Record<number, { label: string; red: boolean }>>({});
   const [lastCapture, setLastCapture] = useState<{ playerName: string, count: number } | null>(null);
   const [turnOrder, setTurnOrder] = useState<number[]>([]);
+  const [turnQuote, setTurnQuote] = useState<{ name: string; quote: string } | null>(null);
+  const turnQuoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [roundWinQuote, setRoundWinQuote] = useState<{ name: string; quote: string } | null>(null);
+  const [winGameQuote, setWinGameQuote] = useState<string | null>(null);
 
   const addLog = useCallback((msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
-    setLogs(prev => [{ text: msg, type, timestamp: Date.now() }, ...prev].slice(0, 100));
+    setLogs(prev => {
+      // Safety dedup: skip if last entry has identical text within the same second
+      if (prev.length > 0 && prev[0].text === msg && Date.now() - prev[0].timestamp < 1000) return prev;
+      return [{ id: ++logIdCounter, text: msg, type, timestamp: Date.now() }, ...prev].slice(0, 100);
+    });
+  }, []);
+
+  const showTurnQuote = useCallback((name: string, quote: string) => {
+    if (turnQuoteTimer.current) clearTimeout(turnQuoteTimer.current);
+    setTurnQuote({ name, quote });
+    turnQuoteTimer.current = setTimeout(() => setTurnQuote(null), 5000);
   }, []);
 
   const showMessage = useCallback((text: string, type: MessageType = 'info') => {
@@ -290,8 +313,6 @@ export default function App() {
     : players.map((p, i) => (gameScores[i] || 0) + (p.captured.length - p.hand.length));
 
   const maxScore = liveScores.length > 0 ? Math.max(...liveScores) : 0;
-  const isTied = liveScores.filter(s => s === maxScore).length > 1 && maxScore > 0;
-  
   // Auto-scroll log to top
   useEffect(() => {
     if (logContainerRef.current) {
@@ -358,6 +379,7 @@ export default function App() {
     setTurnActionCount(0);
     setLastChallengerId(null);
     setLastCapture(null);
+    roundVoteTriggers.current = new Set();
     setGameStarted(true);
     setLogs([]);
     addLog("--- NEW ROUND STARTED ---", 'SYSTEM');
@@ -366,10 +388,10 @@ export default function App() {
 
   const startTurn = useCallback(() => {
     if (deck.length === 0) {
-      setPhase('VOTING');
-      setVotes({});
-      addLog("The Stack is empty! Players must vote: Reshuffle or End Round?", 'SYSTEM');
-      showMessage("Stack empty — time to vote!", 'warning');
+      addLog("Stack depleted — round over.", 'SYSTEM');
+      showMessage("Stack depleted — round over!", 'warning');
+      const isGameOver = calculateRoundScores(players, gameScores);
+      if (!isGameOver) setPhase('ROUND_OVER');
       return;
     }
 
@@ -380,12 +402,14 @@ export default function App() {
     setPile(prev => [...prev, flipped]);
     setLastChallengerId(null);
     setPlayers(prev => prev.map(p => ({ ...p, hasActed: false })));
+    setLastAction({});
     
     if (flipped.isJoker) {
       // Joker flipped from Stack: flipper immediately wins all cards in Pile and Side
       const allCards = [...pile, ...side, flipped];
       addLog(`${currentPlayer?.name} flipped a JOKER from the Stack — wins all ${allCards.length} card${allCards.length !== 1 ? 's' : ''} instantly!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
       showMessage(`${currentPlayer?.name} flipped a Joker — wins the pile instantly!`, 'success');
+      if (currentPlayer) showTurnQuote(currentPlayer.name, getQuote(currentPlayer.name, 'WIN_TURN'));
       setPlayers(prev => prev.map((p, idx) =>
         idx === currentPlayerIndex ? { ...p, captured: [...p.captured, ...allCards] } : p
       ));
@@ -405,69 +429,60 @@ export default function App() {
   }, [deck, pile, side, currentPlayerIndex, players, currentPlayer, turnOrder, addLog, showMessage]);
 
   const handleVote = (playerId: number, choice: 'KEEP' | 'END') => {
-    // Guard: prevent duplicate votes (closure check — setVotes inner check is the reliable one)
+    // Guard: prevent duplicate votes
     if (votes[playerId] !== undefined) return;
 
-    // Capture fresh values at call time to avoid stale closures in the setTimeout
     const currentPlayers = players;
     const currentGameScores = gameScores;
 
+    // Log the vote HERE — outside setVotes so React cannot call it multiple times
+    addLog(`${currentPlayers[playerId].name} voted: ${choice === 'KEEP' ? 'CONTINUE' : 'END ROUND'}`, currentPlayers[playerId].isAI ? 'CPU' : 'PLAYER');
+
+    // Compute the new votes from closure — safe because the outer guard prevents re-entry
+    const newVotes = { ...votes, [playerId]: choice };
+
+    // Pure state update — no side effects inside the updater
     setVotes(prev => {
-      // Inner guard: functional update sees latest votes state
       if (prev[playerId] !== undefined) return prev;
-
-      const newVotes = { ...prev, [playerId]: choice };
-      const voterName = currentPlayers[playerId].name;
-      addLog(`${voterName} voted: ${choice === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'}`, currentPlayers[playerId].isAI ? 'CPU' : 'PLAYER');
-
-      // Check if all players have voted
-      if (Object.keys(newVotes).length === currentPlayers.length) {
-        const keepVotes = Object.values(newVotes).filter(v => v === 'KEEP').length;
-        const endVotes = Object.values(newVotes).filter(v => v === 'END').length;
-
-        let outcome: 'KEEP' | 'END';
-        let summaryMsg = "";
-
-        if (keepVotes > endVotes) {
-          outcome = 'KEEP';
-          summaryMsg = `Vote result: ${keepVotes} for RESHUFFLE, ${endVotes} for END ROUND — RESHUFFLE wins`;
-        } else if (endVotes > keepVotes) {
-          outcome = 'END';
-          summaryMsg = `Vote result: ${endVotes} for END ROUND, ${keepVotes} for RESHUFFLE — END ROUND wins`;
-        } else {
-          // Tie: Coin flip
-          const flip = Math.random() > 0.5 ? 'KEEP' : 'END';
-          outcome = flip;
-          summaryMsg = `Tie — coin flip decided: ${flip === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'}`;
-        }
-
-        // Log summary first, then the prominent outcome line (log is newest-first so outcome appears at top)
-        addLog(summaryMsg, 'SYSTEM');
-        addLog(`--- VOTE OUTCOME: ${outcome === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'} ---`, 'SYSTEM');
-
-        setTimeout(() => {
-          if (outcome === 'KEEP') {
-            // Reshuffle all captured cards
-            const allCaptured = currentPlayers.flatMap(p => p.captured);
-            if (allCaptured.length === 0) {
-              addLog("No captured cards to reshuffle! Ending round instead.", 'SYSTEM');
-              const isGameOver = calculateRoundScores(currentPlayers, currentGameScores);
-              if (!isGameOver) setPhase('ROUND_OVER');
-            } else {
-              const newDeck = shuffle(allCaptured);
-              setDeck(newDeck);
-              setPlayers(prev => prev.map(p => ({ ...p, captured: [] })));
-              setPhase('START');
-              showMessage("Deck reshuffled. Continue playing!");
-            }
-          } else {
-            const isGameOver = calculateRoundScores(currentPlayers, currentGameScores);
-            if (!isGameOver) setPhase('ROUND_OVER');
-          }
-        }, 2000);
-      }
-      return newVotes;
+      return { ...prev, [playerId]: choice };
     });
+
+    // Handle "all voted" logic outside setVotes
+    if (Object.keys(newVotes).length === currentPlayers.length) {
+      const keepVotes = Object.values(newVotes).filter(v => v === 'KEEP').length;
+      const endVotes = Object.values(newVotes).filter(v => v === 'END').length;
+
+      const keepNames = Object.entries(newVotes).filter(([, v]) => v === 'KEEP').map(([id]) => currentPlayers[Number(id)].name);
+      const endNames = Object.entries(newVotes).filter(([, v]) => v === 'END').map(([id]) => currentPlayers[Number(id)].name);
+
+      let outcome: 'KEEP' | 'END';
+      let summaryMsg: string;
+
+      if (keepVotes > endVotes) {
+        outcome = 'KEEP';
+        summaryMsg = `Vote result: CONTINUE ${keepVotes} (${keepNames.join(', ')}) | END ROUND ${endVotes} (${endNames.join(', ')}) → CONTINUE wins`;
+      } else if (endVotes > keepVotes) {
+        outcome = 'END';
+        summaryMsg = `Vote result: CONTINUE ${keepVotes} (${keepNames.join(', ')}) | END ROUND ${endVotes} (${endNames.join(', ')}) → END ROUND wins`;
+      } else {
+        const flip = Math.random() > 0.5 ? 'KEEP' : 'END';
+        outcome = flip;
+        summaryMsg = `Vote result: Tied ${keepVotes}-${endVotes} → Coin flip decided: ${flip === 'KEEP' ? 'CONTINUE' : 'END ROUND'}`;
+      }
+
+      addLog(summaryMsg, 'SYSTEM');
+      addLog(outcome === 'KEEP' ? '--- ROUND CONTINUES ---' : '--- ROUND OVER ---', 'SYSTEM');
+
+      setTimeout(() => {
+        if (outcome === 'KEEP') {
+          setPhase('START');
+          showMessage("Vote: Continue playing! Players with no cards will pass.");
+        } else {
+          const isGameOver = calculateRoundScores(currentPlayers, currentGameScores);
+          if (!isGameOver) setPhase('ROUND_OVER');
+        }
+      }, 2000);
+    }
   };
 
   const calculateRoundScores = useCallback((currentPlayers: Player[], currentGameScores: number[]) => {
@@ -487,10 +502,42 @@ export default function App() {
         const teamRound = score - currentGameScores[i];
         addLog(`Team ${i + 1}: ${teamRound} pts (Total: ${score})`);
       });
+
+      // WIN_ROUND quote for team mode
+      const teamRoundDeltas = newGameScores.map((s, i) => s - currentGameScores[i]);
+      const maxTeamRound = Math.max(...teamRoundDeltas);
+      const winningTeams = teamRoundDeltas.reduce((acc, d, i) => d === maxTeamRound ? [...acc, i] : acc, [] as number[]);
+      if (winningTeams.length === 1) {
+        const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winningTeams[0]);
+        const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
+        if (speaker) {
+          const q = getQuote(speaker.name, 'WIN_ROUND');
+          addLog(`${speaker.name}: "${q}"`);
+          setRoundWinQuote({ name: speaker.name, quote: q });
+        }
+      } else {
+        const q = getTieQuote();
+        addLog(`"${q}"`);
+        setRoundWinQuote({ name: '', quote: q });
+      }
     } else {
       newGameScores = currentGameScores.map((s, i) => s + (roundScores[i] || 0));
       addLog("--- ROUND OVER ---");
       currentPlayers.forEach((p, i) => addLog(`${p.name}: ${roundScores[i]} pts (Total: ${newGameScores[i]})`));
+
+      // WIN_ROUND quote for FFA mode
+      const maxRound = Math.max(...roundScores);
+      const roundWinners = roundScores.reduce((acc, s, i) => s === maxRound ? [...acc, i] : acc, [] as number[]);
+      if (roundWinners.length === 1) {
+        const rw = currentPlayers[roundWinners[0]];
+        const q = getQuote(rw.name, 'WIN_ROUND');
+        addLog(`${rw.name}: "${q}"`);
+        setRoundWinQuote({ name: rw.name, quote: q });
+      } else {
+        const q = getTieQuote();
+        addLog(`"${q}"`);
+        setRoundWinQuote({ name: '', quote: q });
+      }
     }
 
     setGameScores(newGameScores);
@@ -503,8 +550,12 @@ export default function App() {
 
       if (numTeams > 1) {
         addLog(`GAME OVER! Team ${winnerIdx + 1} wins!`);
+        const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winnerIdx);
+        const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
+        if (speaker) setWinGameQuote(getQuote(speaker.name, 'WIN_GAME'));
       } else {
         addLog(`GAME OVER! ${currentPlayers[winnerIdx].name} wins!`);
+        setWinGameQuote(getQuote(currentPlayers[winnerIdx].name, 'WIN_GAME'));
       }
       return true; // Game is over
     }
@@ -520,9 +571,10 @@ export default function App() {
       if (deck.length > 0) {
         const drawn = deck[0];
         setDeck(deck.slice(1));
-        setPlayers(prev => prev.map((p, idx) => 
+        setPlayers(prev => prev.map((p, idx) =>
           idx === currentPlayerIndex ? { ...p, hand: [...p.hand, drawn], hasActed: true } : p
         ));
+        setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: 'drew', red: false } }));
         addLog(`${currentPlayer?.name} drew a card.`);
         showMessage(`${currentPlayer?.name} drew a card.`);
       } else {
@@ -530,10 +582,15 @@ export default function App() {
         return;
       }
     } else if (action === 'PASS') {
-      setPlayers(prev => prev.map((p, idx) => 
+      setPlayers(prev => prev.map((p, idx) =>
         idx === currentPlayerIndex ? { ...p, hasActed: true } : p
       ));
-      addLog(`${currentPlayer?.name} passed.`);
+      setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: 'pass', red: false } }));
+      if (currentPlayer?.hand.length === 0) {
+        addLog(`${currentPlayer?.name} has no cards — passing.`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
+      } else {
+        addLog(`${currentPlayer?.name} passed.`);
+      }
       showMessage(`${currentPlayer?.name} passed.`);
     } else if (action === 'PLAY' && card) {
       const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
@@ -560,9 +617,10 @@ export default function App() {
       if (isJoker) {
         setSide(prev => [...prev, card]);
         setLastChallengerId(currentPlayerIndex);
-        setPlayers(prev => prev.map((p, idx) => 
+        setPlayers(prev => prev.map((p, idx) =>
           idx === currentPlayerIndex ? { ...p, hand: p.hand.filter(c => c.id !== card.id), hasActed: true } : p
         ));
+        setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: 'JKR', red: false } }));
         addLog(`${currentPlayer?.name} played Joker!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
         showMessage(`${currentPlayer?.name} played a Joker — wins the pile!`, 'success');
         turnEndedByJoker = true;
@@ -573,9 +631,10 @@ export default function App() {
         setLeadSuit(card.suit);
         setDeferred(false);
         setLastChallengerId(null);
-        setPlayers(prev => prev.map((p, idx) => 
+        setPlayers(prev => prev.map((p, idx) =>
           idx === currentPlayerIndex ? { ...p, hand: p.hand.filter(c => c.id !== card.id), hasActed: true } : p
         ));
+        setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: getRankLabel(card.rank) + getSuitIcon(card.suit), red: card.suit === Suit.HEARTS || card.suit === Suit.DIAMONDS } }));
         addLog(`${currentPlayer?.name} matched rank ${getRankLabel(card.rank)} and Suit Switched to ${getSuitIcon(card.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
         showMessage(`${currentPlayer?.name} Suit Switched to ${getSuitIcon(card.suit)}!`);
       } else {
@@ -623,9 +682,10 @@ export default function App() {
           addLog(`${currentPlayer?.name} played ${getRankLabel(card.rank)}${getSuitIcon(card.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
         }
 
-        setPlayers(prev => prev.map((p, idx) => 
+        setPlayers(prev => prev.map((p, idx) =>
           idx === currentPlayerIndex ? { ...p, hand: p.hand.filter(c => c.id !== card.id), hasActed: true } : p
         ));
+        setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: getRankLabel(card.rank) + getSuitIcon(card.suit), red: card.suit === Suit.HEARTS || card.suit === Suit.DIAMONDS } }));
       }
     }
 
@@ -663,6 +723,7 @@ export default function App() {
     if (canWin && lastChallengerId !== null) {
       addLog(`${players[lastChallengerId].name} won the pile (${pile.length + side.length} cards).`);
       showMessage(`${players[lastChallengerId].name} won the pile!`, 'success');
+      showTurnQuote(players[lastChallengerId].name, getQuote(players[lastChallengerId].name, 'WIN_TURN'));
       const allCards = [...pile, ...side];
       setLastCapture({ playerName: players[lastChallengerId].name, count: allCards.length });
       
@@ -694,15 +755,22 @@ export default function App() {
     }
 
     // Check for Round End at the end of the TURN
-    // Condition: Any player has no cards left OR (optionally) pile is empty (meaning it was just won)
-    // We prioritize the "no cards left" as the primary round end trigger.
-    const someoneOut = updatedPlayers.some(p => p.hand.length === 0);
-    
-    if (someoneOut) {
+    const stackEmpty = deck.length === 0;
+    const newlyOut = updatedPlayers.filter(p => p.hand.length === 0 && !roundVoteTriggers.current.has(p.id));
+
+    if (stackEmpty) {
+      // Stack empty — this was the last turn, auto-end, no vote
+      addLog("Stack depleted — round over.", 'SYSTEM');
       const isGameOver = calculateRoundScores(updatedPlayers, gameScores);
-      if (!isGameOver) {
-        setPhase('ROUND_OVER');
-      }
+      if (!isGameOver) setPhase('ROUND_OVER');
+    } else if (newlyOut.length > 0) {
+      // First time this player hits 0 cards — trigger vote
+      newlyOut.forEach(p => roundVoteTriggers.current.add(p.id));
+      const outPlayer = newlyOut[0];
+      addLog(`${outPlayer.name} is out of cards — vote: Continue or End Round?`, 'SYSTEM');
+      showMessage(`${outPlayer.name} is out of cards — vote!`, 'warning');
+      setVotes({});
+      setPhase('VOTING');
     } else {
       setPhase('START');
     }
@@ -732,22 +800,29 @@ export default function App() {
     setTurnOrder([]);
   }, []);
 
-  // CPU voting effect — fires once when phase becomes VOTING.
-  // The double-guard in handleVote (closure + functional-update) prevents duplicate votes.
+  // CPU voting effect — module-level Set guards against re-render duplicates.
   useEffect(() => {
     if (phase !== 'VOTING') return;
+    cpuVotesThisPhase.clear(); // reset at start of each voting phase
     const timer = setTimeout(() => {
       players.forEach(p => {
-        if (p.isAI) {
+        if (p.isAI && !cpuVotesThisPhase.has(p.id)) {
+          cpuVotesThisPhase.add(p.id);
           handleVote(p.id, Math.random() > 0.5 ? 'KEEP' : 'END');
         }
       });
     }, 1000);
     return () => clearTimeout(timer);
-    // Intentionally omit `votes` and `players` — we only want this to fire on phase transition.
-    // The guard inside handleVote prevents any double-voting.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
+
+  // Notify when any player with 0 cards reaches ACTION phase — they may draw or pass.
+  useEffect(() => {
+    if (phase !== 'ACTION' || !currentPlayer || currentPlayer.hand.length > 0) return;
+    addLog(`${currentPlayer.name} has no cards — may draw or pass.`, currentPlayer.isAI ? 'CPU' : 'PLAYER');
+    if (!currentPlayer.isAI) showMessage('You have no cards — draw from the stack or pass.');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, currentPlayerIndex]);
 
   // AI game-action effect (START / ACTION phases).
   useEffect(() => {
@@ -871,7 +946,7 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2 bg-amber-500 text-[#141414] px-3 py-0.5 rounded-full font-bold">
               {currentPlayer?.isAI ? <Cpu size={12} /> : <User size={12} />}
-              {currentPlayer?.name}'S TURN
+              {currentPlayer?.isAI ? `${currentPlayer.name}'S` : 'YOUR'} TURN
             </div>
           </div>
 
@@ -931,8 +1006,32 @@ export default function App() {
                   )}
                 </div>
               ) : <div className="text-[10px] opacity-20 italic">Empty</div>}
+              <div className="absolute bottom-1 left-0 right-0 text-center text-[9px] font-bold">
+                {lastChallengerId !== null
+                  ? <span className="text-amber-600">Leading: {players[lastChallengerId]?.name}</span>
+                  : <span className="opacity-30">No winner yet</span>}
+              </div>
             </div>
           </div>
+
+          {/* Turn quote — appears below card zones, fades after 3s */}
+          <AnimatePresence>
+            {turnQuote && (
+              <motion.div
+                key={turnQuote}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="shrink-0 px-4 pb-1 text-center"
+              >
+                <span className="text-amber-500 font-serif text-[20px] leading-snug">
+                  <span className="not-italic font-black text-amber-600">{turnQuote.name}: </span>
+                  <span className="italic">"{turnQuote.quote}"</span>
+                </span>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
         </div>
 
@@ -1013,11 +1112,6 @@ export default function App() {
                             <span className={`${sbConfig.nameSz} font-black italic uppercase truncate ${isLeader ? 'text-amber-700' : ''}`}>
                               Team {teamIdx + 1}
                             </span>
-                            {isLeader && (
-                              <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shrink-0">
-                                <Trophy size={7} /> {isTied ? 'TIE' : 'LEAD'}
-                              </span>
-                            )}
                           </div>
                           <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
                             {score}
@@ -1034,7 +1128,12 @@ export default function App() {
                               <div className="flex items-center gap-0.5">
                                 {p.isAI ? <Cpu size={7} /> : <User size={7} />}
                                 <span className="font-bold truncate max-w-[40px]">{p.name}</span>
-                                {p.hasActed && <span className={`font-black text-[11px] ${currentPlayerIndex === p.id ? 'text-white' : 'text-green-500'}`}>✓</span>}
+                                {p.hasActed && (
+                                  <span className="flex items-center gap-0.5">
+                                    <span className={`font-black text-[11px] ${currentPlayerIndex === p.id ? 'text-white' : 'text-green-500'}`}>✓</span>
+                                    {lastAction[p.id] && <span className={`font-bold text-[10px] ${lastAction[p.id].red ? 'text-red-400' : (currentPlayerIndex === p.id ? 'text-white/70' : 'text-zinc-400')}`}>{lastAction[p.id].label}</span>}
+                                  </span>
+                                )}
                               </div>
                               <div className="flex gap-1.5 font-mono">
                                 <span>H:{p.hand.length}</span>
@@ -1068,10 +1167,10 @@ export default function App() {
                             <span className={`${sbConfig.nameSz} font-black uppercase italic flex items-center gap-0.5 truncate ${isLeader ? 'text-amber-700' : ''}`}>
                               {p.isAI ? <Cpu size={8} /> : <User size={8} />} {p.name}
                             </span>
-                            {p.hasActed && <span className="text-green-500 font-black text-[11px] shrink-0">✓</span>}
-                            {isLeader && (
-                              <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shrink-0">
-                                <Trophy size={7} /> {isTied ? 'TIE' : 'LEAD'}
+                            {p.hasActed && (
+                              <span className="shrink-0 flex items-center gap-0.5">
+                                <span className="text-green-500 font-black text-[11px]">✓</span>
+                                {lastAction[p.id] && <span className={`font-bold ${sbConfig.statSz} ${lastAction[p.id].red ? 'text-red-400' : 'text-zinc-400'}`}>{lastAction[p.id].label}</span>}
                               </span>
                             )}
                           </div>
@@ -1117,9 +1216,9 @@ export default function App() {
               className="flex-1 overflow-y-auto p-4 font-mono text-sm space-y-2 custom-scrollbar bg-[#F8F8F8]"
             >
               <AnimatePresence initial={false}>
-                {logs.map((log, i) => (
-                  <motion.div 
-                    key={log.timestamp + i}
+                {logs.map((log) => (
+                  <motion.div
+                    key={log.id}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     className={`pb-1 border-b border-[#141414]/5 last:border-0 leading-tight
@@ -1152,17 +1251,17 @@ export default function App() {
           >
             <div className="max-w-md w-full border-4 border-[#141414] bg-[#E4E3E0] p-8 text-center shadow-[10px_10px_0px_0px_#141414] rounded-3xl">
               <Layers size={48} className="mx-auto mb-4 text-[#141414]" />
-              <h2 className="text-2xl font-serif italic font-black mb-2 uppercase tracking-tighter">Stack Depleted</h2>
-              <p className="text-sm mb-8 font-bold">The round isn't over yet! Should we reshuffle the captured cards and keep playing, or end the round now?</p>
-              
+              <h2 className="text-2xl font-serif italic font-black mb-2 uppercase tracking-tighter">Player Out of Cards</h2>
+              <p className="text-sm mb-8 font-bold">A player has run out of cards. Keep playing (they'll pass each turn) or end the round now?</p>
+
               <div className="grid grid-cols-2 gap-4">
-                <button 
+                <button
                   disabled={votes[0] !== undefined}
                   onClick={() => handleVote(0, 'KEEP')}
                   className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
                     ${votes[0] === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-amber-50'}`}
                 >
-                  Reshuffle
+                  Continue
                 </button>
                 <button 
                   disabled={votes[0] !== undefined}
@@ -1276,83 +1375,155 @@ export default function App() {
         )}
 
         {phase === 'ROUND_OVER' && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="fixed inset-0 bg-[#E4E3E0]/90 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 bg-[#141414] z-50 flex items-center justify-center p-4"
           >
-            <div className="max-w-md w-full border-2 border-[#141414] bg-white p-8 text-center shadow-[10px_10px_0px_0px_#141414]">
-              <h2 className="text-2xl font-serif italic font-bold mb-4 uppercase">Round Complete</h2>
-              <p className="text-xs opacity-50 mb-6 italic">Review the game log and scores before proceeding.</p>
-              <div className="space-y-4 mb-8">
-                {numTeams > 1 ? (
-                  <>
-                    {new Array(numTeams).fill(0).map((_, teamIdx) => (
-                      <div key={teamIdx} className="flex justify-between items-center border-b border-[#141414] pb-2">
-                        <span className="text-xs font-bold uppercase">Team {teamIdx + 1}</span>
-                        <div className="flex items-center gap-4">
-                          <span className="font-mono text-xl">{gameScores[teamIdx] || 0}</span>
+            <div className="w-full max-w-3xl flex gap-6 h-[80vh]">
+              {/* Left — Scores + quote */}
+              <div className="w-72 shrink-0 border-2 border-[#E4E3E0] bg-[#141414] text-[#E4E3E0] p-8 flex flex-col justify-center">
+                <h2 className="text-3xl font-serif italic font-bold mb-6 uppercase text-center">Round Complete</h2>
+                <div className="space-y-3 mb-6">
+                  {numTeams > 1 ? (
+                    new Array(numTeams).fill(0).map((_, teamIdx) => (
+                      <div key={teamIdx} className="flex justify-between items-center border-b border-[#E4E3E0]/20 pb-2">
+                        <span className="text-xs font-bold uppercase opacity-70">Team {teamIdx + 1}</span>
+                        <span className="font-mono text-xl">{gameScores[teamIdx] || 0}</span>
+                      </div>
+                    ))
+                  ) : (
+                    players.map((p, i) => (
+                      <div key={p.id} className="flex justify-between items-center border-b border-[#E4E3E0]/20 pb-2">
+                        <span className="text-xs font-bold uppercase opacity-70">{p.name}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="text-[10px] opacity-40">+{p.captured.length - p.hand.length}</span>
+                          <span className="font-mono text-xl">{gameScores[i] || 0}</span>
                         </div>
                       </div>
-                    ))}
-                  </>
-                ) : (
-                  players.map((p, i) => (
-                    <div key={p.id} className="flex justify-between items-center border-b border-[#141414] pb-2">
-                      <span className="text-xs font-bold uppercase">{p.name}</span>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] opacity-50">Round: {p.captured.length - p.hand.length}</span>
-                        <span className="font-mono text-xl">{gameScores[i] || 0}</span>
-                      </div>
-                    </div>
-                  ))
+                    ))
+                  )}
+                </div>
+                {roundWinQuote && (
+                  <p className="text-amber-400 italic font-serif text-base text-center mb-6 leading-snug">
+                    {roundWinQuote.name ? <><span className="not-italic text-[10px] uppercase font-black opacity-50 block mb-1">{roundWinQuote.name}</span></> : null}
+                    "{roundWinQuote.quote}"
+                  </p>
                 )}
+                <button
+                  onClick={startRound}
+                  className="w-full py-4 bg-[#E4E3E0] text-[#141414] font-bold uppercase tracking-widest hover:bg-white transition-colors flex items-center justify-center gap-2 mt-auto"
+                >
+                  <RotateCcw size={18} /> Start Next Round
+                </button>
               </div>
-              <button 
-                onClick={startRound}
-                className="w-full py-4 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2"
-              >
-                <RotateCcw size={18} /> Start Next Round
-              </button>
+
+              {/* Right — Game log */}
+              <div className="flex-1 flex flex-col border-2 border-[#E4E3E0]/20 overflow-hidden">
+                <div className="px-4 py-2 bg-[#E4E3E0]/10 shrink-0">
+                  <h2 className="text-[10px] uppercase font-black flex items-center gap-2 italic text-[#E4E3E0]/60">
+                    <Layers size={12} className="text-blue-400" /> Game Log
+                  </h2>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 font-mono text-sm space-y-2 custom-scrollbar">
+                  {logs.map((log) => (
+                    <div
+                      key={log.id}
+                      className={`pb-1 border-b border-white/5 last:border-0 leading-tight
+                        ${log.type === 'PLAYER' ? 'text-blue-400 font-bold' :
+                          log.type === 'CPU' ? 'text-red-400 italic' :
+                          'text-zinc-500'}
+                        ${log.text.startsWith('---') ? 'bg-amber-900/30 p-2 rounded text-amber-300 font-black text-center my-2 text-xs' : ''}
+                      `}
+                    >
+                      <span className="opacity-30 text-[9px] mr-2">[{new Date(log.timestamp).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' })}]</span>
+                      <span className="font-black mr-1 text-[10px]">
+                        {log.type === 'PLAYER' ? 'YOU:' : log.type === 'CPU' ? 'CPU:' : 'SYS:'}
+                      </span>
+                      {log.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </motion.div>
         )}
 
         {phase === 'GAME_OVER' && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             className="fixed inset-0 bg-[#141414] z-50 flex items-center justify-center p-4"
           >
-            <div className="max-w-md w-full border-2 border-[#E4E3E0] bg-[#141414] text-[#E4E3E0] p-8 text-center">
-              <Trophy size={64} className="mx-auto mb-6 text-amber-500" />
-              <h2 className="text-4xl font-serif italic font-bold mb-2 uppercase">Victory</h2>
-              <p className="text-xl font-mono mb-8">
-                {winner !== null ? (numTeams > 1 ? `Team ${winner + 1}` : players[winner].name) : 'Unknown'} has reached the target score!
-              </p>
-              <div className="space-y-2 mb-8 opacity-70">
-                {numTeams > 1 ? (
-                  new Array(numTeams).fill(0).map((_, teamIdx) => (
-                    <div key={teamIdx} className="flex justify-between">
-                      <span>Team {teamIdx + 1}</span>
-                      <span className="font-mono">{gameScores[teamIdx] || 0}</span>
-                    </div>
-                  ))
-                ) : (
-                  players.map((p, i) => (
-                    <div key={p.id} className="flex justify-between">
-                      <span>{p.name}</span>
-                      <span className="font-mono">{gameScores[i] || 0}</span>
-                    </div>
-                  ))
+            <div className="w-full max-w-3xl flex gap-6 h-[80vh]">
+              {/* Left — Victory panel */}
+              <div className="w-72 shrink-0 border-2 border-[#E4E3E0] bg-[#141414] text-[#E4E3E0] p-8 text-center flex flex-col justify-center">
+                <Trophy size={64} className="mx-auto mb-6 text-amber-500" />
+                <h2 className="text-4xl font-serif italic font-bold mb-2 uppercase">Victory</h2>
+                <p className="text-lg font-mono mb-4">
+                  {winner !== null
+                    ? (numTeams > 1
+                        ? `Team ${winner + 1} has reached the target score!`
+                        : players[winner].isAI
+                          ? `${players[winner].name} has reached the target score!`
+                          : 'You have reached the target score!')
+                    : 'Game over!'}
+                </p>
+                {winGameQuote && (
+                  <p className="text-amber-400 italic font-serif text-lg mb-6 leading-snug">"{winGameQuote}"</p>
                 )}
+                <div className="space-y-2 mb-8 opacity-70 text-sm">
+                  {numTeams > 1 ? (
+                    new Array(numTeams).fill(0).map((_, teamIdx) => (
+                      <div key={teamIdx} className="flex justify-between">
+                        <span>Team {teamIdx + 1}</span>
+                        <span className="font-mono">{gameScores[teamIdx] || 0}</span>
+                      </div>
+                    ))
+                  ) : (
+                    players.map((p, i) => (
+                      <div key={p.id} className="flex justify-between">
+                        <span>{p.name}</span>
+                        <span className="font-mono">{gameScores[i] || 0}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <button
+                  onClick={resetGame}
+                  className="w-full py-4 bg-[#E4E3E0] text-[#141414] font-bold uppercase tracking-widest hover:bg-white transition-colors"
+                >
+                  New Game
+                </button>
               </div>
-              <button 
-                onClick={resetGame}
-                className="w-full py-4 bg-[#E4E3E0] text-[#141414] font-bold uppercase tracking-widest hover:bg-white transition-colors"
-              >
-                New Game
-              </button>
+
+              {/* Right — Game log */}
+              <div className="flex-1 flex flex-col border-2 border-[#E4E3E0]/20 overflow-hidden">
+                <div className="px-4 py-2 bg-[#E4E3E0]/10 shrink-0">
+                  <h2 className="text-[10px] uppercase font-black flex items-center gap-2 italic text-[#E4E3E0]/60">
+                    <Layers size={12} className="text-blue-400" /> Game Log
+                  </h2>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 font-mono text-sm space-y-2 custom-scrollbar">
+                  {logs.map((log) => (
+                    <div
+                      key={log.id}
+                      className={`pb-1 border-b border-white/5 last:border-0 leading-tight
+                        ${log.type === 'PLAYER' ? 'text-blue-400 font-bold' :
+                          log.type === 'CPU' ? 'text-red-400 italic' :
+                          'text-zinc-500'}
+                        ${log.text.startsWith('---') ? 'bg-amber-900/30 p-2 rounded text-amber-300 font-black text-center my-2 text-xs' : ''}
+                      `}
+                    >
+                      <span className="opacity-30 text-[9px] mr-2">[{new Date(log.timestamp).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' })}]</span>
+                      <span className="font-black mr-1 text-[10px]">
+                        {log.type === 'PLAYER' ? 'YOU:' : log.type === 'CPU' ? 'CPU:' : 'SYS:'}
+                      </span>
+                      {log.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </motion.div>
         )}
