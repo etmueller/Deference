@@ -5,14 +5,12 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Trophy, 
-  RotateCcw, 
-  Info, 
-  ChevronRight, 
-  User, 
-  Cpu, 
-  Layers, 
+import {
+  Trophy,
+  RotateCcw,
+  User,
+  Cpu,
+  Layers,
   ArrowDownCircle,
   AlertCircle
 } from 'lucide-react';
@@ -56,13 +54,13 @@ interface LogEntry {
   timestamp: number;
 }
 
+type MessageType = 'info' | 'warning' | 'error' | 'success';
+
 const SUITS = [Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS, Suit.SPADES];
 const RANKS = [
   Rank.TWO, Rank.THREE, Rank.FOUR, Rank.FIVE, Rank.SIX, Rank.SEVEN, 
   Rank.EIGHT, Rank.NINE, Rank.TEN, Rank.JACK, Rank.QUEEN, Rank.KING, Rank.ACE
 ];
-
-const TARGET_SCORE = 52;
 
 // --- Helpers ---
 
@@ -94,6 +92,13 @@ const getSuitColor = (suit: Suit) => {
   return 'text-zinc-900';
 };
 
+// Suit color for display on a dark background (status bar)
+const getSuitColorOnDark = (suit: Suit) => {
+  if (suit === Suit.HEARTS || suit === Suit.DIAMONDS) return 'text-red-400';
+  if (suit === Suit.JOKER) return 'text-purple-400';
+  return 'text-white'; // Clubs and Spades: white so they don't disappear
+};
+
 const getSuitIcon = (suit: Suit) => {
   switch (suit) {
     case Suit.HEARTS: return '♥';
@@ -113,6 +118,39 @@ const getRankLabel = (rank: Rank) => {
   if (rank === Rank.ACE) return 'A';
   if (rank === Rank.JOKER) return 'JK';
   return '';
+};
+
+// Returns the 0-based team index for a player using sequential (block) assignment.
+// e.g. 6 players, 3 teams → P0,P1=T0  P2,P3=T1  P4,P5=T2
+const getTeamIndex = (playerIdx: number, totalPlayers: number, totalTeams: number): number => {
+  if (totalTeams <= 1) return playerIdx;
+  const teamSize = Math.floor(totalPlayers / totalTeams);
+  return Math.floor(playerIdx / teamSize);
+};
+
+// Target score based on competing units (teams in team mode, players in FFA).
+const calcTargetScore = (numPlayers: number, numTeams: number): number => {
+  const units = numTeams > 1 ? numTeams : numPlayers;
+  return Math.ceil(100 / units) + 2;
+};
+
+// Available team modes per even player count. Odd counts are always Free for All.
+type TeamMode = { label: string; numTeams: number };
+const TEAM_MODES: Record<number, TeamMode[]> = {
+  4: [
+    { label: 'Free for All', numTeams: 1 },
+    { label: '2v2',          numTeams: 2 },
+  ],
+  6: [
+    { label: 'Free for All', numTeams: 1 },
+    { label: '3v3',          numTeams: 2 },
+    { label: '2v2v2',        numTeams: 3 },
+  ],
+  8: [
+    { label: 'Free for All', numTeams: 1 },
+    { label: '4v4',          numTeams: 2 },
+    { label: '2v2v2v2',      numTeams: 4 },
+  ],
 };
 
 // --- Components ---
@@ -190,29 +228,35 @@ export default function App() {
   const [deferred, setDeferred] = useState(false);
   const [gameScores, setGameScores] = useState<number[]>([]);
   const [turnActionCount, setTurnActionCount] = useState(0);
-  const [message, setMessage] = useState("Welcome to DEFER. Configure your game and initialize.");
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState<MessageType>('info');
   const [winner, setWinner] = useState<number | null>(null);
   const [lastChallengerId, setLastChallengerId] = useState<number | null>(null);
   const [gameStarted, setGameStarted] = useState(false);
   const [roundLeaderIndex, setRoundLeaderIndex] = useState(0);
   const [turnLeaderIndex, setTurnLeaderIndex] = useState(0);
   const [playerCount, setPlayerCount] = useState(3);
-  const [numTeams, setNumTeams] = useState(1); // 1 = Normal, 2 = 2 Teams, 3 = 3 Teams
+  const [numTeams, setNumTeams] = useState(1); // 1 = Free for All; >1 = team count
   const [targetScore, setTargetScore] = useState(36);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [votes, setVotes] = useState<{ [playerId: number]: 'KEEP' | 'END' }>({});
   const [lastCapture, setLastCapture] = useState<{ playerName: string, count: number } | null>(null);
 
-  const addLog = (msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
+  const addLog = useCallback((msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
     setLogs(prev => [{ text: msg, type, timestamp: Date.now() }, ...prev].slice(0, 100));
-  };
+  }, []);
+
+  const showMessage = useCallback((text: string, type: MessageType = 'info') => {
+    setMessage(text);
+    setMessageType(type);
+  }, []);
 
   const currentPlayer = players[currentPlayerIndex] as Player | undefined;
   
-  const liveScores = numTeams > 1 
+  const liveScores = numTeams > 1
     ? new Array(numTeams).fill(0).map((_, teamIdx) => {
-        const teamPlayers = players.filter((_, i) => i % numTeams === teamIdx);
+        const teamPlayers = players.filter((_, i) => getTeamIndex(i, players.length, numTeams) === teamIdx);
         const teamRoundScore = teamPlayers.reduce((acc, p) => acc + (p.captured.length - p.hand.length), 0);
         return (gameScores[teamIdx] || 0) + teamRoundScore;
       })
@@ -227,6 +271,13 @@ export default function App() {
       logContainerRef.current.scrollTop = 0;
     }
   }, [logs]);
+
+  // Auto-clear message after 2 seconds
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(''), 2000);
+    return () => clearTimeout(timer);
+  }, [message]);
 
   // --- Logic ---
 
@@ -271,18 +322,19 @@ export default function App() {
     setLeadSuit(null);
     setTurnActionCount(0);
     setLastChallengerId(null);
+    setLastCapture(null);
     setGameStarted(true);
     setLogs([]);
     addLog("--- NEW ROUND STARTED ---", 'SYSTEM');
-    setMessage("Round started. Your turn to flip a card.");
-  }, [playerCount, gameStarted, roundLeaderIndex, numTeams]);
+    showMessage("Round started. Your turn to flip a card.");
+  }, [playerCount, gameStarted, roundLeaderIndex, numTeams, addLog, showMessage]);
 
   const startTurn = useCallback(() => {
     if (deck.length === 0) {
       setPhase('VOTING');
       setVotes({});
       addLog("The Stack is empty! Players must vote: Reshuffle or End Round?", 'SYSTEM');
-      setMessage("Stack empty. Time to vote!");
+      showMessage("Stack empty — time to vote!", 'warning');
       return;
     }
 
@@ -295,39 +347,43 @@ export default function App() {
     setPlayers(prev => prev.map(p => ({ ...p, hasActed: false })));
     
     if (flipped.isJoker) {
-      addLog(`${currentPlayer?.name} flipped a Joker!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
-      setMessage(`${currentPlayer?.name} flipped a Joker and wins the pile!`);
-      // Joker immediate win
+      // Joker flipped from Stack: flipper immediately wins all cards in Pile and Side
       const allCards = [...pile, ...side, flipped];
-      setPlayers(prev => prev.map((p, idx) => 
+      addLog(`${currentPlayer?.name} flipped a JOKER from the Stack — wins all ${allCards.length} card${allCards.length !== 1 ? 's' : ''} instantly!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
+      showMessage(`${currentPlayer?.name} flipped a Joker — wins the pile instantly!`, 'success');
+      setPlayers(prev => prev.map((p, idx) =>
         idx === currentPlayerIndex ? { ...p, captured: [...p.captured, ...allCards] } : p
       ));
       setPile([]);
       setSide([]);
-      setPhase('START'); 
-      // Rule: "the next player flips to start a new turn"
+      setPhase('START');
+      // The next player clockwise flips to start the new turn
       setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length);
     } else {
       setLeadSuit(flipped.suit);
-      setDeferred(false); 
+      setDeferred(false);
       setPhase('ACTION');
       setTurnActionCount(0);
       addLog(`${currentPlayer?.name} flipped ${getRankLabel(flipped.rank)}${getSuitIcon(flipped.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
-      setMessage(`Lead suit is ${getSuitIcon(flipped.suit)}. Choose an action.`);
+      showMessage(`Lead suit is ${getSuitIcon(flipped.suit)}. Choose an action.`);
     }
-  }, [deck, pile, side, currentPlayerIndex, players, currentPlayer]);
+  }, [deck, pile, side, currentPlayerIndex, players, currentPlayer, addLog, showMessage]);
 
   const handleVote = (playerId: number, choice: 'KEEP' | 'END') => {
+    // Capture fresh values at call time to avoid stale closures in the setTimeout
+    const currentPlayers = players;
+    const currentGameScores = gameScores;
+
     setVotes(prev => {
       const newVotes = { ...prev, [playerId]: choice };
-      const voterName = players[playerId].name;
-      addLog(`${voterName} voted to ${choice === 'KEEP' ? 'Reshuffle' : 'End Round'}.`, players[playerId].isAI ? 'CPU' : 'PLAYER');
+      const voterName = currentPlayers[playerId].name;
+      addLog(`${voterName} voted to ${choice === 'KEEP' ? 'Reshuffle' : 'End Round'}.`, currentPlayers[playerId].isAI ? 'CPU' : 'PLAYER');
 
       // Check if all players have voted
-      if (Object.keys(newVotes).length === players.length) {
+      if (Object.keys(newVotes).length === currentPlayers.length) {
         const keepVotes = Object.values(newVotes).filter(v => v === 'KEEP').length;
         const endVotes = Object.values(newVotes).filter(v => v === 'END').length;
-        
+
         let outcome: 'KEEP' | 'END';
         let logMsg = "";
 
@@ -350,20 +406,20 @@ export default function App() {
         setTimeout(() => {
           if (outcome === 'KEEP') {
             // Reshuffle all captured cards
-            const allCaptured = players.flatMap(p => p.captured);
+            const allCaptured = currentPlayers.flatMap(p => p.captured);
             if (allCaptured.length === 0) {
               addLog("No captured cards to reshuffle! Ending round instead.", 'SYSTEM');
-              const isGameOver = calculateRoundScores(players);
+              const isGameOver = calculateRoundScores(currentPlayers, currentGameScores);
               if (!isGameOver) setPhase('ROUND_OVER');
             } else {
               const newDeck = shuffle(allCaptured);
               setDeck(newDeck);
               setPlayers(prev => prev.map(p => ({ ...p, captured: [] })));
               setPhase('START');
-              setMessage("Deck reshuffled. Continue playing!");
+              showMessage("Deck reshuffled. Continue playing!");
             }
           } else {
-            const isGameOver = calculateRoundScores(players);
+            const isGameOver = calculateRoundScores(currentPlayers, currentGameScores);
             if (!isGameOver) setPhase('ROUND_OVER');
           }
         }, 2000);
@@ -372,23 +428,25 @@ export default function App() {
     });
   };
 
-  const calculateRoundScores = (currentPlayers: Player[]) => {
+  const calculateRoundScores = useCallback((currentPlayers: Player[], currentGameScores: number[]) => {
     const roundScores = currentPlayers.map(p => p.captured.length - p.hand.length);
     let newGameScores: number[] = [];
 
     if (numTeams > 1) {
       newGameScores = new Array(numTeams).fill(0).map((_, teamIdx) => {
-        const teamRound = roundScores.filter((_, i) => i % numTeams === teamIdx).reduce((a, b) => a + b, 0);
-        return gameScores[teamIdx] + teamRound;
+        const teamRound = roundScores
+          .filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === teamIdx)
+          .reduce((a, b) => a + b, 0);
+        return currentGameScores[teamIdx] + teamRound;
       });
-      
+
       addLog("--- ROUND OVER ---");
       newGameScores.forEach((score, i) => {
-        const teamRound = score - gameScores[i];
+        const teamRound = score - currentGameScores[i];
         addLog(`Team ${i + 1}: ${teamRound} pts (Total: ${score})`);
       });
     } else {
-      newGameScores = gameScores.map((s, i) => s + (roundScores[i] || 0));
+      newGameScores = currentGameScores.map((s, i) => s + (roundScores[i] || 0));
       addLog("--- ROUND OVER ---");
       currentPlayers.forEach((p, i) => addLog(`${p.name}: ${roundScores[i]} pts (Total: ${newGameScores[i]})`));
     }
@@ -400,7 +458,7 @@ export default function App() {
       const maxScore = Math.max(...newGameScores);
       const winnerIdx = newGameScores.indexOf(maxScore);
       setWinner(winnerIdx);
-      
+
       if (numTeams > 1) {
         addLog(`GAME OVER! Team ${winnerIdx + 1} wins!`);
       } else {
@@ -409,7 +467,7 @@ export default function App() {
       return true; // Game is over
     }
     return false; // Game continues
-  };
+  }, [numTeams, targetScore, addLog]);
 
   const handleAction = (action: 'PLAY' | 'DRAW' | 'PASS', card?: Card) => {
     if (phase !== 'ACTION') return;
@@ -424,9 +482,9 @@ export default function App() {
           idx === currentPlayerIndex ? { ...p, hand: [...p.hand, drawn], hasActed: true } : p
         ));
         addLog(`${currentPlayer?.name} drew a card.`);
-        setMessage(`${currentPlayer?.name} drew a card.`);
+        showMessage(`${currentPlayer?.name} drew a card.`);
       } else {
-        setMessage("Stack is empty. Cannot draw.");
+        showMessage("Stack is empty. Cannot draw.", 'warning');
         return;
       }
     } else if (action === 'PASS') {
@@ -434,7 +492,7 @@ export default function App() {
         idx === currentPlayerIndex ? { ...p, hasActed: true } : p
       ));
       addLog(`${currentPlayer?.name} passed.`);
-      setMessage(`${currentPlayer?.name} passed.`);
+      showMessage(`${currentPlayer?.name} passed.`);
     } else if (action === 'PLAY' && card) {
       const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
       const hasLeadSuit = currentPlayer?.hand.some(c => c.suit === leadSuit && !c.isJoker);
@@ -447,13 +505,13 @@ export default function App() {
 
       // 1. Basic Legality Check
       if (!isJoker && !isLeadSuit && !isRankMatch && !isLegalDiamond) {
-        setMessage(`Illegal play! Must play ${getSuitIcon(leadSuit!)}, a rank match, a Joker, or a Diamond (if no ${getSuitIcon(leadSuit!)})`);
+        showMessage(`Illegal play! Must play ${getSuitIcon(leadSuit!)}, a rank match, a Joker, or a Diamond (if no ${getSuitIcon(leadSuit!)})`, 'error');
         return;
       }
 
       // 2. Specific "Must Follow Suit" check for Diamonds
       if (isDiamond && hasLeadSuit && !isLeadSuit && !isRankMatch) {
-        setMessage(`Cannot play Diamond while you have ${getSuitIcon(leadSuit!)}`);
+        showMessage(`Cannot play Diamond while you hold ${getSuitIcon(leadSuit!)}`, 'error');
         return;
       }
 
@@ -464,7 +522,7 @@ export default function App() {
           idx === currentPlayerIndex ? { ...p, hand: p.hand.filter(c => c.id !== card.id), hasActed: true } : p
         ));
         addLog(`${currentPlayer?.name} played Joker!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
-        setMessage(`${currentPlayer?.name} played a Joker! Turn ends.`);
+        showMessage(`${currentPlayer?.name} played a Joker — wins the pile!`, 'success');
         turnEndedByJoker = true;
       } else if (isRankMatch) {
         // Suit Switch: Merge side into pile and reset challengers
@@ -477,13 +535,13 @@ export default function App() {
           idx === currentPlayerIndex ? { ...p, hand: p.hand.filter(c => c.id !== card.id), hasActed: true } : p
         ));
         addLog(`${currentPlayer?.name} matched rank ${getRankLabel(card.rank)} and Suit Switched to ${getSuitIcon(card.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
-        setMessage(`${currentPlayer?.name} Suit Switched to ${getSuitIcon(card.suit)}!`);
+        showMessage(`${currentPlayer?.name} Suit Switched to ${getSuitIcon(card.suit)}!`);
       } else {
         // Lead suit play or Diamond Defer
         if (isDiamond && !isLeadSuit && !deferred) {
           setDeferred(true);
           addLog(`${currentPlayer?.name} deferred the pile.`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
-          setMessage(`${currentPlayer?.name} deferred the pile!`);
+          showMessage(`${currentPlayer?.name} deferred the pile!`, 'warning');
         }
 
         const sideTop = side.length > 0 ? side[side.length - 1] : null;
@@ -562,7 +620,7 @@ export default function App() {
 
     if (canWin && lastChallengerId !== null) {
       addLog(`${players[lastChallengerId].name} won the pile (${pile.length + side.length} cards).`);
-      setMessage(`${players[lastChallengerId].name} won the pile!`);
+      showMessage(`${players[lastChallengerId].name} won the pile!`, 'success');
       const allCards = [...pile, ...side];
       setLastCapture({ playerName: players[lastChallengerId].name, count: allCards.length });
       
@@ -579,10 +637,10 @@ export default function App() {
     } else {
       if (deferred) {
         addLog("Pile deferred. Cards merged into pile.");
-        setMessage("Pile deferred. Cards merged into pile.");
+        showMessage("Pile deferred — cards merge into the pile.", 'warning');
       } else {
         addLog("Pile not won. Cards merged.");
-        setMessage("Pile not won. Side cards merged into pile.");
+        showMessage("Pile not won — side cards merge into the pile.");
       }
       const newPile = [...pile, ...side];
       setPile(newPile);
@@ -599,7 +657,7 @@ export default function App() {
     const someoneOut = updatedPlayers.some(p => p.hand.length === 0);
     
     if (someoneOut) {
-      const isGameOver = calculateRoundScores(updatedPlayers);
+      const isGameOver = calculateRoundScores(updatedPlayers, gameScores);
       if (!isGameOver) {
         setPhase('ROUND_OVER');
       }
@@ -607,6 +665,29 @@ export default function App() {
       setPhase('START');
     }
   };
+
+  const resetGame = useCallback(() => {
+    setDeck([]);
+    setPile([]);
+    setSide([]);
+    setPlayers([]);
+    setCurrentPlayerIndex(0);
+    setPhase('START');
+    setLeadSuit(null);
+    setDeferred(false);
+    setGameScores([]);
+    setTurnActionCount(0);
+    setMessage('');
+    setMessageType('info');
+    setWinner(null);
+    setLastChallengerId(null);
+    setGameStarted(false);
+    setRoundLeaderIndex(0);
+    setTurnLeaderIndex(0);
+    setLogs([]);
+    setVotes({});
+    setLastCapture(null);
+  }, []);
 
   useEffect(() => {
     if (phase === 'VOTING') {
@@ -685,12 +766,21 @@ export default function App() {
   const sideTop = side.length > 0 ? side[side.length - 1] : null;
   const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
 
+  // Adaptive scoreboard sizing based on player count
+  const sbConfig = playerCount <= 2
+    ? { scoreSz: 'text-3xl',     nameSz: 'text-sm',     pad: 'px-3 py-2.5',   statSz: 'text-[13px]', useGrid: false }
+    : playerCount <= 4
+    ? { scoreSz: 'text-[28px]',  nameSz: 'text-sm',     pad: 'px-2 py-2',     statSz: 'text-[13px]', useGrid: false }
+    : playerCount <= 5
+    ? { scoreSz: 'text-2xl',     nameSz: 'text-xs',     pad: 'px-2 py-1.5',   statSz: 'text-[11px]', useGrid: false }
+    : { scoreSz: 'text-xl',      nameSz: 'text-[10px]', pad: 'px-1.5 py-1',   statSz: 'text-[10px]', useGrid: true  };
+
   return (
     <div className="h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0] flex flex-col overflow-hidden">
       {/* Header - Minimal */}
       <header className="border-b border-[#141414] px-4 py-2 flex justify-between items-center bg-white/30 shrink-0">
         <div className="flex items-baseline gap-2">
-          <h1 className="text-xl font-bold tracking-tighter uppercase italic font-serif">DEFER</h1>
+          <h1 className="text-xl font-bold tracking-tighter uppercase italic font-serif">DEFERENCE</h1>
           <p className="text-[10px] uppercase tracking-widest opacity-60 font-bold">Diamonds are for the clever.</p>
         </div>
         <div className="flex gap-4 items-center">
@@ -699,7 +789,7 @@ export default function App() {
             <p className="font-mono font-bold text-lg">{targetScore}</p>
           </div>
           <button 
-            onClick={() => window.location.reload()}
+            onClick={resetGame}
             className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors border border-[#141414] rounded"
           >
             <RotateCcw size={14} />
@@ -707,15 +797,15 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 flex overflow-hidden">
-        {/* LEFT COLUMN (65%) */}
-        <div className="w-[65%] flex flex-col border-r border-[#141414] overflow-hidden">
+      <main className="flex-1 grid grid-cols-[65%_35%] grid-rows-[auto_1fr] overflow-hidden">
+        {/* TOP-LEFT: Status bar + Notification bar + Card zones */}
+        <div className="border-r border-b border-[#141414] flex flex-col overflow-hidden">
           {/* Status Bar */}
           <div className="bg-[#141414] text-[#E4E3E0] px-4 py-2 flex items-center justify-between text-xs font-mono shrink-0">
             <div className="flex gap-6 items-center">
               <span className="flex items-center gap-2">
                 <span className="opacity-50 uppercase">Lead:</span>
-                <span className={`font-bold text-lg ${leadSuit ? getSuitColor(leadSuit) : ''}`}>
+                <span className={`font-bold text-[22px] leading-none ${leadSuit ? getSuitColorOnDark(leadSuit) : (pile.length > 0 ? getSuitColorOnDark(pile[pile.length - 1].suit) : 'opacity-30')}`}>
                   {leadSuit ? getSuitIcon(leadSuit) : (pile.length > 0 ? getSuitIcon(pile[pile.length - 1].suit) : '∅')}
                 </span>
               </span>
@@ -734,10 +824,22 @@ export default function App() {
             </div>
           </div>
 
-          {/* Middle: Card Zones */}
-          <div className="flex-1 flex items-center justify-around p-2 gap-2 min-h-0">
+          {/* Message Bar — fixed height, always rendered to prevent layout shift */}
+          <div className={`h-8 px-4 flex items-center text-xs font-bold shrink-0 transition-colors duration-150
+            ${message
+              ? messageType === 'error'   ? 'bg-red-600 text-white'
+              : messageType === 'warning' ? 'bg-amber-400 text-[#141414]'
+              : messageType === 'success' ? 'bg-green-600 text-white'
+              : 'bg-[#141414]/80 text-[#E4E3E0]'
+              : 'bg-transparent'}`}
+          >
+            {message || '\u00A0'}
+          </div>
+
+          {/* Middle: Card Zones — fixed height, flush against status bar */}
+          <div className="shrink-0 flex items-stretch justify-around px-2 py-2 gap-2">
             {/* Stack */}
-            <div className="flex-1 h-full max-h-[160px] border border-[#141414] border-dashed rounded-xl flex flex-col items-center justify-center bg-white/10 relative">
+            <div className="flex-1 h-[156px] border border-[#141414] border-dashed rounded-xl flex flex-col items-center justify-center bg-white/10 relative">
               <span className="absolute top-1 left-2 text-[9px] uppercase font-black opacity-30">Stack</span>
               {deck.length > 0 ? (
                 <div 
@@ -753,7 +855,7 @@ export default function App() {
             </div>
 
             {/* Pile */}
-            <div className={`flex-1 h-full max-h-[160px] border border-[#141414] rounded-xl flex flex-col items-center justify-center bg-white/20 relative ${deferred ? 'ring-2 ring-amber-500' : ''}`}>
+            <div className={`flex-1 h-[156px] border border-[#141414] rounded-xl flex flex-col items-center justify-center bg-white/20 relative ${deferred ? 'ring-2 ring-amber-500' : ''}`}>
               <span className="absolute top-1 left-2 text-[9px] uppercase font-black opacity-30">Pile</span>
               {pile.length > 0 ? (
                 <div className="relative">
@@ -766,7 +868,7 @@ export default function App() {
             </div>
 
             {/* Side */}
-            <div className="flex-1 h-full max-h-[160px] border border-[#141414] rounded-xl flex flex-col items-center justify-center bg-white/30 relative">
+            <div className="flex-1 h-[156px] border border-[#141414] rounded-xl flex flex-col items-center justify-center bg-white/30 relative">
               <span className="absolute top-1 left-2 text-[9px] uppercase font-black opacity-30">Side</span>
               {side.length > 0 ? (
                 <div className="relative">
@@ -781,14 +883,16 @@ export default function App() {
             </div>
           </div>
 
-          {/* Bottom: Your Hand */}
-          <div className="p-2 bg-white/40 border-t border-[#141414] shrink-0">
+        </div>
+
+        {/* BOTTOM-LEFT: Your Hand + Buttons */}
+        <div className="border-r border-[#141414] flex flex-col p-2 bg-white/40 row-start-2 col-start-1">
             <div className="flex items-center gap-2 mb-1">
               <ArrowDownCircle size={14} className="text-amber-600" />
               <span className="text-[10px] uppercase font-black">Your Hand</span>
             </div>
-            
-            <div className="flex justify-center gap-1 overflow-x-hidden min-h-[90px]">
+
+            <div className="flex justify-center items-center gap-1 overflow-x-hidden py-1">
               <AnimatePresence>
                 {players.length > 0 && players[0].hand.map((card, idx) => (
                   <CardView 
@@ -825,54 +929,63 @@ export default function App() {
               </button>
             </div>
           </div>
-        </div>
 
-        {/* RIGHT COLUMN (35%) */}
-        <div className="w-[35%] flex flex-col h-full overflow-hidden">
-          {/* Scoreboard (Top 45%) */}
-          <section className="h-[45%] border-b border-[#141414] flex flex-col overflow-hidden bg-white/50">
+        {/* TOP-RIGHT: Scoreboard — row 1, col 2; height matches top-left via grid row */}
+        <section className="border-b border-[#141414] flex flex-col overflow-hidden bg-white/50 row-start-1 col-start-2">
             <div className="px-4 py-2 border-b border-[#141414] bg-[#141414] text-[#E4E3E0] flex justify-between items-center shrink-0">
               <h2 className="text-[10px] uppercase font-black flex items-center gap-2 italic">
                 <Trophy size={12} className="text-amber-400" /> Scoreboard
               </h2>
             </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-1.5 custom-scrollbar">
+            <div className="flex-1 overflow-hidden p-1.5">
               {numTeams > 1 ? (
-                <div className="space-y-2">
+                <div className={sbConfig.useGrid ? 'grid grid-cols-2 gap-1 h-full content-start' : 'space-y-1.5 h-full'}>
                   {new Array(numTeams).fill(0).map((_, teamIdx) => {
+                    const teamPlayers = players.filter((_, i) => getTeamIndex(i, players.length, numTeams) === teamIdx);
                     const score = liveScores[teamIdx] || 0;
                     const isLeader = score === maxScore && maxScore > 0;
-                    const isCurrentTeam = currentPlayerIndex % numTeams === teamIdx;
-                    
+                    const isCurrentTeam = getTeamIndex(currentPlayerIndex, players.length, numTeams) === teamIdx;
+
                     return (
-                      <div 
-                        key={teamIdx} 
-                        className={`p-1.5 border rounded-lg transition-all duration-300 relative overflow-hidden
-                          ${isCurrentTeam ? 'border-l-4 border-l-blue-500 bg-blue-50/50 shadow-sm' : 'bg-white border-[#141414]/10'}
-                          ${isLeader ? 'border-l-4 border-l-amber-500 ring-1 ring-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.1)]' : ''}
+                      <div
+                        key={teamIdx}
+                        className={`border rounded-lg overflow-hidden transition-all duration-300 bg-white
+                          ${isLeader ? 'border-l-4 border-l-amber-500 ring-1 ring-amber-400' :
+                            isCurrentTeam ? 'border-l-4 border-l-blue-500' : 'border-[#141414]/10'}
                         `}
                       >
-                        <div className="flex justify-between items-center mb-0.5">
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[9px] font-black italic ${isLeader ? 'text-amber-700' : ''}`}>TEAM {teamIdx + 1}</span>
+                        {/* Team header — score is most prominent */}
+                        <div className={`flex justify-between items-center ${sbConfig.pad}
+                          ${isLeader ? 'bg-amber-50' : isCurrentTeam ? 'bg-blue-50/60' : ''}`}
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className={`${sbConfig.nameSz} font-black italic uppercase truncate ${isLeader ? 'text-amber-700' : ''}`}>
+                              Team {teamIdx + 1}
+                            </span>
                             {isLeader && (
-                              <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shadow-sm">
-                                <Trophy size={8} /> {isTied ? 'TIED' : 'LEADING'}
+                              <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shrink-0">
+                                <Trophy size={7} /> {isTied ? 'TIE' : 'LEAD'}
                               </span>
                             )}
                           </div>
-                          <span className={`font-mono text-xl font-black ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
+                          <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
                             {score}
                           </span>
                         </div>
-                        <div className="grid grid-cols-2 gap-1 pt-1 border-t border-[#141414]/5">
-                          {players.filter((_, i) => i % numTeams === teamIdx).map(p => (
-                            <div key={p.id} className={`text-[7px] flex justify-between items-center p-0.5 rounded transition-colors ${currentPlayerIndex === p.id ? 'bg-blue-500 text-white font-bold' : 'opacity-70'}`}>
-                              <div className="flex items-center gap-1">
-                                <span className="truncate max-w-[35px]">{p.name}</span>
-                                {p.hasActed && <span className={`${currentPlayerIndex === p.id ? 'text-white' : 'text-green-500'} font-black`}>✓</span>}
+                        {/* Individual player sub-rows */}
+                        <div className="divide-y divide-[#141414]/5 border-t border-[#141414]/10">
+                          {teamPlayers.map(p => (
+                            <div
+                              key={p.id}
+                              className={`flex justify-between items-center px-2 py-0.5 ${sbConfig.statSz} transition-colors
+                                ${currentPlayerIndex === p.id ? 'bg-blue-500 text-white' : 'opacity-60'}`}
+                            >
+                              <div className="flex items-center gap-0.5">
+                                {p.isAI ? <Cpu size={7} /> : <User size={7} />}
+                                <span className="font-bold truncate max-w-[40px]">{p.name}</span>
+                                {p.hasActed && <span className={`font-black text-[11px] ${currentPlayerIndex === p.id ? 'text-white' : 'text-green-500'}`}>✓</span>}
                               </div>
-                              <div className="flex gap-0.5 opacity-80">
+                              <div className="flex gap-1.5 font-mono">
                                 <span>H:{p.hand.length}</span>
                                 <span>C:{p.captured.length}</span>
                               </div>
@@ -884,43 +997,45 @@ export default function App() {
                   })}
                 </div>
               ) : (
-                players.map((p, i) => {
-                  const score = liveScores[i] || 0;
-                  const isLeader = score === maxScore && maxScore > 0;
-                  const isCurrent = currentPlayerIndex === i;
-                  
-                  return (
-                    <div 
-                      key={p.id} 
-                      className={`px-2 py-1.5 border rounded-lg flex justify-between items-center transition-all duration-300 relative overflow-hidden
-                        ${isCurrent ? 'border-l-4 border-l-blue-500 bg-blue-50/50 shadow-sm' : 'bg-white border-[#141414]/10'}
-                        ${isLeader ? 'border-l-4 border-l-amber-500 ring-1 ring-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.1)]' : ''}
-                        ${p.hasActed && !isCurrent ? 'opacity-50 grayscale-[0.3]' : ''}
-                      `}
-                    >
-                      <div className="flex flex-col">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`text-[9px] font-black uppercase flex items-center gap-1 italic ${isLeader ? 'text-amber-700' : ''}`}>
-                            {p.isAI ? <Cpu size={10} /> : <User size={10} />} {p.name}
-                          </span>
-                          {p.hasActed && <span className="text-green-600 text-[9px] font-black">✓</span>}
-                          {isLeader && (
-                            <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shadow-sm">
-                              <Trophy size={8} /> {isTied ? 'TIED' : 'LEADING'}
+                <div className={sbConfig.useGrid ? 'grid grid-cols-2 gap-1 h-full content-start' : 'space-y-1.5 h-full'}>
+                  {players.map((p, i) => {
+                    const score = liveScores[i] || 0;
+                    const isLeader = score === maxScore && maxScore > 0;
+                    const isCurrent = currentPlayerIndex === i;
+
+                    return (
+                      <div
+                        key={p.id}
+                        className={`${sbConfig.pad} border rounded-lg flex justify-between items-center transition-all duration-300
+                          ${isCurrent ? 'border-l-4 border-l-blue-500 bg-blue-50/50' : 'bg-white border-[#141414]/10'}
+                          ${isLeader ? 'border-l-4 border-l-amber-500 ring-1 ring-amber-400' : ''}
+                          ${p.hasActed && !isCurrent ? 'opacity-50' : ''}
+                        `}
+                      >
+                        <div className="flex flex-col min-w-0">
+                          <div className="flex items-center gap-1">
+                            <span className={`${sbConfig.nameSz} font-black uppercase italic flex items-center gap-0.5 truncate ${isLeader ? 'text-amber-700' : ''}`}>
+                              {p.isAI ? <Cpu size={8} /> : <User size={8} />} {p.name}
                             </span>
-                          )}
+                            {p.hasActed && <span className="text-green-500 font-black text-[11px] shrink-0">✓</span>}
+                            {isLeader && (
+                              <span className="flex items-center gap-0.5 bg-amber-400 text-[#141414] px-1 py-0.5 rounded text-[7px] font-black not-italic shrink-0">
+                                <Trophy size={7} /> {isTied ? 'TIE' : 'LEAD'}
+                              </span>
+                            )}
+                          </div>
+                          <div className={`flex gap-1.5 mt-0.5 font-bold text-zinc-400 ${sbConfig.statSz}`}>
+                            <span>H:{p.hand.length}</span>
+                            <span>C:{p.captured.length}</span>
+                          </div>
                         </div>
-                        <div className="flex gap-2 mt-0.5 text-[8px] font-bold opacity-50">
-                          <span className="flex items-center gap-1">H: {p.hand.length}</span>
-                          <span className="flex items-center gap-1">C: {p.captured.length}</span>
-                        </div>
+                        <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
+                          {score}
+                        </span>
                       </div>
-                      <span className={`font-mono text-xl font-black ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
-                        {score}
-                      </span>
-                    </div>
-                  );
-                })
+                    );
+                  })}
+                </div>
               )}
             </div>
             
@@ -939,8 +1054,8 @@ export default function App() {
             </div>
           </section>
 
-          {/* Game Log (Bottom 55%) */}
-          <section className="h-[55%] flex flex-col overflow-hidden bg-white">
+        {/* BOTTOM-RIGHT: Game Log — row 2, col 2 */}
+        <section className="flex flex-col overflow-hidden bg-white row-start-2 col-start-2">
             <div className="px-4 py-2 border-b border-[#141414] bg-[#141414] text-[#E4E3E0] shrink-0">
               <h2 className="text-[10px] uppercase font-black flex items-center gap-2 italic">
                 <Layers size={12} className="text-blue-400" /> Game Log
@@ -972,8 +1087,7 @@ export default function App() {
                 ))}
               </AnimatePresence>
             </div>
-          </section>
-        </div>
+        </section>
       </main>
 
       {/* Overlays */}
@@ -1032,22 +1146,21 @@ export default function App() {
             className="fixed inset-0 bg-[#E4E3E0]/90 backdrop-blur-sm z-50 flex items-center justify-center p-4"
           >
             <div className="max-w-md w-full border-2 border-[#141414] bg-white p-8 text-center shadow-[10px_10px_0px_0px_#141414]">
-              <h2 className="text-4xl font-serif italic font-bold mb-4 tracking-tighter">DEFER</h2>
+              <h2 className="text-4xl font-serif italic font-bold mb-4 tracking-tighter">DEFERENCE</h2>
               <p className="text-sm mb-8 opacity-70 italic">Diamonds are for the clever.</p>
               
               <div className="space-y-6 mb-8 text-left">
+                {/* Player count */}
                 <div>
                   <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Number of Players</label>
-                  <div className="flex gap-2">
-                    {[2, 3, 4, 5, 6, 7].map(n => (
-                      <button 
+                  <div className="flex gap-1.5">
+                    {[2, 3, 4, 5, 6, 7, 8].map(n => (
+                      <button
                         key={n}
                         onClick={() => {
                           setPlayerCount(n);
-                          // Default score calculation: ceil(100/n) + 2
-                          const defaultScore = Math.ceil(100 / n) + 2;
-                          setTargetScore(defaultScore);
                           setNumTeams(1);
+                          setTargetScore(calcTargetScore(n, 1));
                         }}
                         className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${playerCount === n ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
                       >
@@ -1057,59 +1170,40 @@ export default function App() {
                   </div>
                 </div>
 
-                {playerCount === 4 && (
+                {/* Game mode — only for even counts with team options */}
+                {TEAM_MODES[playerCount] && (
                   <div>
                     <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Game Mode</label>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={() => { setNumTeams(1); setTargetScore(27); }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === 1 ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        Normal
-                      </button>
-                      <button 
-                        onClick={() => { setNumTeams(2); setTargetScore(54); }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === 2 ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        Teams (2v2)
-                      </button>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {TEAM_MODES[playerCount].map(mode => (
+                        <button
+                          key={mode.numTeams}
+                          onClick={() => {
+                            setNumTeams(mode.numTeams);
+                            setTargetScore(calcTargetScore(playerCount, mode.numTeams));
+                          }}
+                          className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === mode.numTeams ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
 
-                {playerCount === 6 && (
-                  <div>
-                    <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Game Mode</label>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={() => { setNumTeams(1); setTargetScore(19); }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === 1 ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        Normal
-                      </button>
-                      <button 
-                        onClick={() => { setNumTeams(2); setTargetScore(54); }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === 2 ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        Teams (3v3)
-                      </button>
-                      <button 
-                        onClick={() => { setNumTeams(3); setTargetScore(36); }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === 3 ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        Teams (2v2v2)
-                      </button>
-                    </div>
-                  </div>
-                )}
-
+                {/* Target score */}
                 <div>
-                  <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Target Score</label>
+                  <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">
+                    Target Score
+                    <span className="ml-2 normal-case opacity-70">
+                      ⌈100 ÷ {numTeams > 1 ? numTeams : playerCount}⌉ + 2
+                    </span>
+                  </label>
                   <div className="flex items-center gap-4">
-                    <input 
-                      type="range" 
-                      min="10" 
-                      max="100" 
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
                       step="1"
                       value={targetScore}
                       onChange={(e) => setTargetScore(parseInt(e.target.value))}
@@ -1203,7 +1297,7 @@ export default function App() {
                 )}
               </div>
               <button 
-                onClick={() => window.location.reload()}
+                onClick={resetGame}
                 className="w-full py-4 bg-[#E4E3E0] text-[#141414] font-bold uppercase tracking-widest hover:bg-white transition-colors"
               >
                 New Game
