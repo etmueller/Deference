@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "c:\\Users\\etmue\\Desktop\\Github\\defererence\\src"
+    ],
+    "allow": [
+      "Bash(python src/engine/game_engine.py)"
+    ]
+  }
+}

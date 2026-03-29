@@ -58,9 +58,11 @@ type MessageType = 'info' | 'warning' | 'error' | 'success';
 
 const SUITS = [Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS, Suit.SPADES];
 const RANKS = [
-  Rank.TWO, Rank.THREE, Rank.FOUR, Rank.FIVE, Rank.SIX, Rank.SEVEN, 
+  Rank.TWO, Rank.THREE, Rank.FOUR, Rank.FIVE, Rank.SIX, Rank.SEVEN,
   Rank.EIGHT, Rank.NINE, Rank.TEN, Rank.JACK, Rank.QUEEN, Rank.KING, Rank.ACE
 ];
+
+const CPU_NAMES = ['Lucy', 'Zane', 'Uncle', 'Barney', 'Fabi', 'Jane', 'Noema'];
 
 // --- Helpers ---
 
@@ -132,6 +134,30 @@ const getTeamIndex = (playerIdx: number, totalPlayers: number, totalTeams: numbe
 const calcTargetScore = (numPlayers: number, numTeams: number): number => {
   const units = numTeams > 1 ? numTeams : numPlayers;
   return Math.ceil(100 / units) + 2;
+};
+
+// Compute interleaved turn order for team modes.
+// Teams are sequential blocks; players are interleaved one-per-team per slot.
+// e.g. 4p 2v2: [0,2,1,3]  6p 3v3: [0,3,1,4,2,5]  6p 2v2v2: [0,2,4,1,3,5]
+// Re-exported from src/engine/GameEngine.ts — keep in sync.
+export const computeInterleavedOrder = (numPlayers: number, numTeams: number): number[] => {
+  if (numTeams <= 1) return Array.from({ length: numPlayers }, (_, i) => i);
+  const teamSize = Math.floor(numPlayers / numTeams);
+  const order: number[] = [];
+  for (let slot = 0; slot < teamSize; slot++) {
+    for (let t = 0; t < numTeams; t++) {
+      order.push(t * teamSize + slot);
+    }
+  }
+  return order;
+};
+
+// Return the next player index by cycling through the turnOrder array.
+const nextInOrder = (current: number, order: number[]): number => {
+  if (order.length === 0) return (current + 1);
+  const pos = order.indexOf(current);
+  if (pos === -1) return order[0];
+  return order[(pos + 1) % order.length];
 };
 
 // Available team modes per even player count. Odd counts are always Free for All.
@@ -242,6 +268,7 @@ export default function App() {
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [votes, setVotes] = useState<{ [playerId: number]: 'KEEP' | 'END' }>({});
   const [lastCapture, setLastCapture] = useState<{ playerName: string, count: number } | null>(null);
+  const [turnOrder, setTurnOrder] = useState<number[]>([]);
 
   const addLog = useCallback((msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
     setLogs(prev => [{ text: msg, type, timestamp: Date.now() }, ...prev].slice(0, 100));
@@ -289,7 +316,7 @@ export default function App() {
     for (let i = 0; i < playerCount; i++) {
       newPlayers.push({
         id: i,
-        name: i === 0 ? 'Player 1' : `CPU ${i}`,
+        name: i === 0 ? 'You' : CPU_NAMES[i - 1],
         hand: newDeck.splice(0, 4),
         captured: [],
         isAI: i !== 0,
@@ -316,7 +343,15 @@ export default function App() {
     setRoundLeaderIndex(nextLeader);
     setTurnLeaderIndex(nextLeader);
     setCurrentPlayerIndex(nextLeader);
-    
+
+    // Compute interleaved turn order for team modes, rotated to start at the round leader.
+    const baseOrder = computeInterleavedOrder(playerCount, numTeams);
+    const startPos = baseOrder.indexOf(nextLeader);
+    const rotatedOrder = startPos >= 0
+      ? [...baseOrder.slice(startPos), ...baseOrder.slice(0, startPos)]
+      : baseOrder;
+    setTurnOrder(rotatedOrder);
+
     setPhase('START');
     setDeferred(false);
     setLeadSuit(null);
@@ -357,8 +392,8 @@ export default function App() {
       setPile([]);
       setSide([]);
       setPhase('START');
-      // The next player clockwise flips to start the new turn
-      setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length);
+      // The next player in turn order flips to start the new turn
+      setCurrentPlayerIndex(nextInOrder(currentPlayerIndex, turnOrder));
     } else {
       setLeadSuit(flipped.suit);
       setDeferred(false);
@@ -367,17 +402,23 @@ export default function App() {
       addLog(`${currentPlayer?.name} flipped ${getRankLabel(flipped.rank)}${getSuitIcon(flipped.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
       showMessage(`Lead suit is ${getSuitIcon(flipped.suit)}. Choose an action.`);
     }
-  }, [deck, pile, side, currentPlayerIndex, players, currentPlayer, addLog, showMessage]);
+  }, [deck, pile, side, currentPlayerIndex, players, currentPlayer, turnOrder, addLog, showMessage]);
 
   const handleVote = (playerId: number, choice: 'KEEP' | 'END') => {
+    // Guard: prevent duplicate votes (closure check — setVotes inner check is the reliable one)
+    if (votes[playerId] !== undefined) return;
+
     // Capture fresh values at call time to avoid stale closures in the setTimeout
     const currentPlayers = players;
     const currentGameScores = gameScores;
 
     setVotes(prev => {
+      // Inner guard: functional update sees latest votes state
+      if (prev[playerId] !== undefined) return prev;
+
       const newVotes = { ...prev, [playerId]: choice };
       const voterName = currentPlayers[playerId].name;
-      addLog(`${voterName} voted to ${choice === 'KEEP' ? 'Reshuffle' : 'End Round'}.`, currentPlayers[playerId].isAI ? 'CPU' : 'PLAYER');
+      addLog(`${voterName} voted: ${choice === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'}`, currentPlayers[playerId].isAI ? 'CPU' : 'PLAYER');
 
       // Check if all players have voted
       if (Object.keys(newVotes).length === currentPlayers.length) {
@@ -385,23 +426,24 @@ export default function App() {
         const endVotes = Object.values(newVotes).filter(v => v === 'END').length;
 
         let outcome: 'KEEP' | 'END';
-        let logMsg = "";
+        let summaryMsg = "";
 
         if (keepVotes > endVotes) {
           outcome = 'KEEP';
-          logMsg = `Majority voted to KEEP PLAYING (${keepVotes} vs ${endVotes}).`;
+          summaryMsg = `Vote result: ${keepVotes} for RESHUFFLE, ${endVotes} for END ROUND — RESHUFFLE wins`;
         } else if (endVotes > keepVotes) {
           outcome = 'END';
-          logMsg = `Majority voted to END ROUND (${endVotes} vs ${keepVotes}).`;
+          summaryMsg = `Vote result: ${endVotes} for END ROUND, ${keepVotes} for RESHUFFLE — END ROUND wins`;
         } else {
           // Tie: Coin flip
           const flip = Math.random() > 0.5 ? 'KEEP' : 'END';
           outcome = flip;
-          logMsg = `It's a TIE (${keepVotes} vs ${endVotes})! System coin flip decided: ${flip === 'KEEP' ? 'KEEP PLAYING' : 'END ROUND'}.`;
+          summaryMsg = `Tie — coin flip decided: ${flip === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'}`;
         }
 
+        // Log summary first, then the prominent outcome line (log is newest-first so outcome appears at top)
+        addLog(summaryMsg, 'SYSTEM');
         addLog(`--- VOTE OUTCOME: ${outcome === 'KEEP' ? 'RESHUFFLE' : 'END ROUND'} ---`, 'SYSTEM');
-        addLog(logMsg, 'SYSTEM');
 
         setTimeout(() => {
           if (outcome === 'KEEP') {
@@ -596,7 +638,7 @@ export default function App() {
         setPhase('END_CHECK');
       }, 100);
     } else {
-      setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length);
+      setCurrentPlayerIndex(nextInOrder(currentPlayerIndex, turnOrder));
     }
   };
 
@@ -646,7 +688,7 @@ export default function App() {
       setPile(newPile);
       setSide([]);
       setDeferred(false);
-      const nextTurnLeader = (turnLeaderIndex + 1) % players.length;
+      const nextTurnLeader = nextInOrder(turnLeaderIndex, turnOrder);
       setTurnLeaderIndex(nextTurnLeader);
       setCurrentPlayerIndex(nextTurnLeader);
     }
@@ -687,20 +729,29 @@ export default function App() {
     setLogs([]);
     setVotes({});
     setLastCapture(null);
+    setTurnOrder([]);
   }, []);
 
+  // CPU voting effect — fires once when phase becomes VOTING.
+  // The double-guard in handleVote (closure + functional-update) prevents duplicate votes.
   useEffect(() => {
-    if (phase === 'VOTING') {
-      const timer = setTimeout(() => {
-        players.forEach(p => {
-          if (p.isAI && votes[p.id] === undefined) {
-            const choice = Math.random() > 0.5 ? 'KEEP' : 'END';
-            handleVote(p.id, choice);
-          }
-        });
-      }, 1000);
-      return () => clearTimeout(timer);
-    }
+    if (phase !== 'VOTING') return;
+    const timer = setTimeout(() => {
+      players.forEach(p => {
+        if (p.isAI) {
+          handleVote(p.id, Math.random() > 0.5 ? 'KEEP' : 'END');
+        }
+      });
+    }, 1000);
+    return () => clearTimeout(timer);
+    // Intentionally omit `votes` and `players` — we only want this to fire on phase transition.
+    // The guard inside handleVote prevents any double-voting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
+  // AI game-action effect (START / ACTION phases).
+  useEffect(() => {
+    if (phase === 'VOTING') return; // handled by the effect above
 
     if (currentPlayer?.isAI) {
       if (phase === 'START') {
@@ -715,19 +766,19 @@ export default function App() {
           // AI Logic: Respect strict suit rules
           const hasLeadSuit = currentPlayer?.hand.some(c => c.suit === leadSuit && !c.isJoker);
           const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
-          
+
           let playable: Card[] = [];
           if (hasLeadSuit) {
             // Must play lead suit, Joker, or Rank Match
-            playable = currentPlayer?.hand.filter(c => 
-              c.suit === leadSuit || 
-              c.isJoker || 
+            playable = currentPlayer?.hand.filter(c =>
+              c.suit === leadSuit ||
+              c.isJoker ||
               (pileTop && c.rank === pileTop.rank)
             ) || [];
           } else {
             // Can play Joker, Rank Match, or Diamond (Defer)
-            playable = currentPlayer?.hand.filter(c => 
-              c.isJoker || 
+            playable = currentPlayer?.hand.filter(c =>
+              c.isJoker ||
               (pileTop && c.rank === pileTop.rank) ||
               (c.suit === Suit.DIAMONDS)
             ) || [];
@@ -759,7 +810,7 @@ export default function App() {
         return () => clearTimeout(timer);
       }
     }
-  }, [phase, currentPlayerIndex, leadSuit, pile, deck.length, startTurn, currentPlayer?.isAI, votes, players]);
+  }, [phase, currentPlayerIndex, leadSuit, pile, deck.length, startTurn, currentPlayer?.isAI]);
 
   // --- Render Helpers ---
 
