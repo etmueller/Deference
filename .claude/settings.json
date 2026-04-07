@@ -2,7 +2,30 @@
   "permissions": {
     "allow": [
       "Bash(python src/engine/game_engine.py)",
-      "Bash(find /c/Users/etmue/Desktop/Github/defererence/src -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))"
+      "Bash(find /c/Users/etmue/Desktop/Github/defererence/src -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))",
+      "Bash(python -c \":*)",
+      "Bash(python debug/run_debug_game.py --players 4 --seed 42)",
+      "Bash(python debug/run_debug_game.py --players 4 --random --seed 42)",
+      "Bash(python -c \"from training.selfplay_env import SelfPlayEnv, run_match\")",
+      "Bash(python training/train_rl.py --style Zane --updates 300 --save-dir checkpoints --seed 42)",
+      "Bash(PYTHONPATH=\".\" python training/train_rl.py --style Zane --updates 300 --save-dir checkpoints --seed 42)",
+      "Bash(python training/train_rl.py --style Zane --updates 1000 --seed 42)",
+      "Bash(PYTHONPATH=. python training/train_rl.py --style Zane --updates 1000 --seed 42)",
+      "Read(//mnt/c/Users/etmue/AppData/Local/Temp/claude/c--Users-etmue-Desktop-Github-defererence/7e54b03a-1c6d-445d-bdac-80de7a1f8eef/**)",
+      "Read(//c/Users/etmue/Desktop/Github/defererence/$TEMP/**)",
+      "Read(//c/Users/etmue/Desktop/Github/defererence/$LOCALAPPDATA/Temp/**)",
+      "Read(//c/Users/etmue/Desktop/Github/defererence/$LOCALAPPDATA/Temp/claude/c--Users-etmue-Desktop-Github-defererence/7e54b03a-1c6d-445d-bdac-80de7a1f8eef/**)",
+      "Read(//c/Users/etmue/Desktop/Github/defererence/$LOCALAPPDATA/Temp/claude/c--Users-etmue-Desktop-Github-defererence/7e54b03a-1c6d-445d-bdac-80de7a1f8eef/tasks/**)",
+      "Bash(python training/train_rl.py --style Zane --updates 100 --seed 42)",
+      "Bash(python training/train_rl.py --style Lucy --updates 5 --seed 42)",
+      "Bash(python training/train_all.py --updates-override 50 --save-dir checkpoints_test)",
+      "Read(//c/Users/etmue/.claude/projects/c--Users-etmue-Desktop-Github-defererence/7e54b03a-1c6d-445d-bdac-80de7a1f8eef/tool-results/**)",
+      "Bash(python training/evaluate_population.py --dir checkpoints --quick)",
+      "Bash(ls /c/Users/etmue/Desktop/Github/DiamondsRL/checkpoints/*.pt)",
+      "Bash(python training/evaluate_population.py --dir checkpoints --quick --games 3)",
+      "Bash(python training/eval_tournament.py --dir checkpoints --games-1v1 3 --games-2v2 3 --games-8p 5 --top-n 4 --quiet)",
+      "Bash(python -c ':*)",
+      "Bash(pip show:*)"
     ],
     "additionalDirectories": [
       "c:\\Users\\etmue\\Desktop\\Github\\defererence\\src"

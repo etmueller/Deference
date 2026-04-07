@@ -12,8 +12,15 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    optimizeDeps: {
+      exclude: ['onnxruntime-web'],
+    },
+    assetsInclude: ['**/*.wasm'],
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
+      fs: {
+        allow: ['..'],
+      },
     },
   };
 });

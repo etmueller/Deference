@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { loadAllPlayers, getAIMove, type InferenceState } from './aiInference'
 import { getQuote, getTieQuote } from './quotes';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -250,6 +251,19 @@ const CardView = ({ card, onClick, disabled, className = "", isHidden = false, s
 const cpuVotesThisPhase = new Set<number>();
 
 export default function App() {
+  // --- AI model loading (runs once on mount) ---
+  useEffect(() => {
+    loadAllPlayers({
+      Lucy:  '/Deference/models/Lucy_2800_inline.onnx',
+      Zane:  '/Deference/models/Zane_950_inline.onnx',
+      Uncle: '/Deference/models/Uncle_950_inline.onnx',
+      Barney:'/Deference/models/Barney_2350_inline.onnx',
+      Fabi:  '/Deference/models/Fabi_3250_inline.onnx',
+      Jane:  '/Deference/models/Jane_3850_inline.onnx',
+      Noema: '/Deference/models/Noema_3850_inline.onnx',
+    }).catch(err => console.error('[AI] Model load error:', err))
+  }, [])
+
   // --- State ---
   const [deck, setDeck] = useState<Card[]>([]);
   const [pile, setPile] = useState<Card[]>([]);
@@ -802,19 +816,33 @@ export default function App() {
 
   // CPU voting effect — module-level Set guards against re-render duplicates.
   useEffect(() => {
-    if (phase !== 'VOTING') return;
-    cpuVotesThisPhase.clear(); // reset at start of each voting phase
-    const timer = setTimeout(() => {
-      players.forEach(p => {
-        if (p.isAI && !cpuVotesThisPhase.has(p.id)) {
-          cpuVotesThisPhase.add(p.id);
-          handleVote(p.id, Math.random() > 0.5 ? 'KEEP' : 'END');
+    if (phase !== 'VOTING') return
+    cpuVotesThisPhase.clear()
+    const timer = setTimeout(async () => {
+      for (const p of players) {
+        if (!p.isAI || cpuVotesThisPhase.has(p.id)) continue
+        cpuVotesThisPhase.add(p.id)
+
+        const inferState: InferenceState = {
+          players, pile, side, deck, leadSuit, deferred,
+          currentPlayerIndex: p.id,  // each player votes in turn
+          turnOrder, turnLeaderIndex, lastChallengerId,
+          turnActionCount, gameScores, targetScore, numTeams, phase, votes,
         }
-      });
-    }, 1000);
-    return () => clearTimeout(timer);
+
+        try {
+          const move = await getAIMove(p.name, inferState, p.id)
+          const choice = move.type === 'VOTE' ? move.choice : 'KEEP'
+          handleVote(p.id, choice)
+        } catch {
+          // Fallback to random vote on model error
+          handleVote(p.id, Math.random() > 0.5 ? 'KEEP' : 'END')
+        }
+      }
+    }, 1000)
+    return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
+  }, [phase])
 
   // Notify when any player with 0 cards reaches ACTION phase — they may draw or pass.
   useEffect(() => {
@@ -837,52 +865,44 @@ export default function App() {
       }
 
       if (phase === 'ACTION') {
-        const timer = setTimeout(() => {
-          // AI Logic: Respect strict suit rules
-          const hasLeadSuit = currentPlayer?.hand.some(c => c.suit === leadSuit && !c.isJoker);
-          const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
+        const timer = setTimeout(async () => {
+          if (!currentPlayer?.isAI || !currentPlayer.name) return
 
-          let playable: Card[] = [];
-          if (hasLeadSuit) {
-            // Must play lead suit, Joker, or Rank Match
-            playable = currentPlayer?.hand.filter(c =>
-              c.suit === leadSuit ||
-              c.isJoker ||
-              (pileTop && c.rank === pileTop.rank)
-            ) || [];
-          } else {
-            // Can play Joker, Rank Match, or Diamond (Defer)
-            playable = currentPlayer?.hand.filter(c =>
-              c.isJoker ||
-              (pileTop && c.rank === pileTop.rank) ||
-              (c.suit === Suit.DIAMONDS)
-            ) || [];
+          // Build the InferenceState subset that aiInference.ts needs
+          const inferState: InferenceState = {
+            players,
+            pile,
+            side,
+            deck,
+            leadSuit,
+            deferred,
+            currentPlayerIndex,
+            turnOrder,
+            turnLeaderIndex,
+            lastChallengerId,
+            turnActionCount,
+            gameScores,
+            targetScore,
+            numTeams,
+            phase,
+            votes,
           }
 
-          if (playable.length > 0) {
-            // Prefer Joker if it wins, or Suit Switch if no lead suit
-            const joker = playable.find(c => c.isJoker);
-            if (joker) {
-              handleAction('PLAY', joker);
-              return;
+          try {
+            const move = await getAIMove(currentPlayer.name, inferState, currentPlayer.id)
+            if (move.type === 'PLAY') {
+              handleAction('PLAY', move.card as Card)
+            } else if (move.type === 'DRAW') {
+              handleAction('DRAW')
+            } else {
+              handleAction('PASS')
             }
-
-            const switchCard = !hasLeadSuit ? playable.find(c => pile.length > 0 && c.rank === pile[pile.length - 1].rank) : null;
-            if (switchCard) {
-              handleAction('PLAY', switchCard);
-              return;
-            }
-
-            // Play highest playable
-            const best = playable.sort((a, b) => b.rank - a.rank)[0];
-            handleAction('PLAY', best);
-          } else if (deck.length > 0) {
-            handleAction('DRAW');
-          } else {
-            handleAction('PASS');
+          } catch (err) {
+            console.error(`[AI] ${currentPlayer.name} inference failed, falling back to PASS:`, err)
+            handleAction('PASS')
           }
-        }, 1500);
-        return () => clearTimeout(timer);
+        }, 1500)
+        return () => clearTimeout(timer)
       }
     }
   }, [phase, currentPlayerIndex, leadSuit, pile, deck.length, startTurn, currentPlayer?.isAI]);
