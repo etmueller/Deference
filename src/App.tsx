@@ -184,6 +184,46 @@ const TEAM_MODES: Record<number, TeamMode[]> = {
   ],
 };
 
+// --- Setup constants ---
+
+type SkillLevel = 'expert' | 'mid' | 'beginner' | 'human';
+type SeatEntry = { name: string; isHuman: boolean };
+
+const ROSTER_PLAYERS: { name: string; isHuman: boolean; skill: SkillLevel }[] = [
+  { name: 'You',    isHuman: true,  skill: 'human'    },
+  { name: 'Noema',  isHuman: false, skill: 'expert'   },
+  { name: 'Jane',   isHuman: false, skill: 'expert'   },
+  { name: 'Lucy',   isHuman: false, skill: 'mid'      },
+  { name: 'Fabi',   isHuman: false, skill: 'mid'      },
+  { name: 'Barney', isHuman: false, skill: 'mid'      },
+  { name: 'Uncle',  isHuman: false, skill: 'beginner' },
+  { name: 'Zane',   isHuman: false, skill: 'beginner' },
+];
+
+const TEAM_COLOR_CLASSES = [
+  { border: 'border-blue-500',    bg: 'bg-blue-50',    text: 'text-blue-600',    labelBg: 'bg-blue-500 text-white'    },
+  { border: 'border-red-500',     bg: 'bg-red-50',     text: 'text-red-600',     labelBg: 'bg-red-500 text-white'     },
+  { border: 'border-emerald-500', bg: 'bg-emerald-50', text: 'text-emerald-600', labelBg: 'bg-emerald-500 text-white' },
+  { border: 'border-amber-500',   bg: 'bg-amber-50',   text: 'text-amber-600',   labelBg: 'bg-amber-500 text-white'   },
+];
+
+const SkillBadge = ({ skill }: { skill: SkillLevel }) => {
+  if (skill === 'human') return <span className="text-[9px] font-black uppercase opacity-50 tracking-wider">HUMAN</span>;
+  const stars = skill === 'expert' ? '★★★' : skill === 'mid' ? '★★☆' : '★☆☆';
+  const color = skill === 'expert' ? 'text-amber-500' : skill === 'mid' ? 'text-zinc-400' : 'text-zinc-300';
+  return <span className={`text-[11px] font-mono leading-none ${color}`}>{stars}</span>;
+};
+
+const getDisplayName = (seatsArr: (SeatEntry | null)[], idx: number): string => {
+  const s = seatsArr[idx];
+  if (!s) return '';
+  if (s.isHuman) return 'You';
+  const sameCount = seatsArr.slice(0, idx + 1).filter(x => x && x.name === s.name && !x.isHuman).length;
+  const totalSame = seatsArr.filter(x => x && x.name === s.name && !x.isHuman).length;
+  if (totalSame <= 1) return s.name;
+  return `${s.name} ${'ABCDEFG'[sameCount - 1]}`;
+};
+
 // --- Components ---
 
 interface CardViewProps {
@@ -297,6 +337,13 @@ export default function App() {
   const [roundWinQuote, setRoundWinQuote] = useState<{ name: string; quote: string } | null>(null);
   const [winGameQuote, setWinGameQuote] = useState<string | null>(null);
 
+  // --- Setup flow state ---
+  const [setupStep, setSetupStep] = useState<1 | 2>(1);
+  const [setupSeats, setSetupSeats] = useState<(SeatEntry | null)[]>([]);
+  const chosenPlayersRef = useRef<{ name: string; isAI: boolean }[]>([]);
+  const seatSlotRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [isDraggingSetup, setIsDraggingSetup] = useState(false);
+
   const addLog = useCallback((msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
     setLogs(prev => {
       // Safety dedup: skip if last entry has identical text within the same second
@@ -343,44 +390,44 @@ export default function App() {
 
   // --- Logic ---
 
-  const startRound = useCallback(() => {
+  const startRound = useCallback((initConfigs?: { name: string; isAI: boolean }[], initCount?: number) => {
     const newDeck = shuffle(createDeck());
-    
-    // Initialize players based on playerCount
-    const newPlayers: Player[] = [];
-    for (let i = 0; i < playerCount; i++) {
-      newPlayers.push({
-        id: i,
-        name: i === 0 ? 'You' : CPU_NAMES[i - 1],
-        hand: newDeck.splice(0, 4),
-        captured: [],
-        isAI: i !== 0,
-        hasActed: false
-      });
-    }
+
+    // Use provided configs (first round) or fall back to the ref set at game start (subsequent rounds)
+    const configs = initConfigs ?? chosenPlayersRef.current;
+    const count = initCount ?? configs.length;
+
+    const newPlayers: Player[] = configs.map((cfg, i) => ({
+      id: i,
+      name: cfg.name,
+      hand: newDeck.splice(0, 4),
+      captured: [],
+      isAI: cfg.isAI,
+      hasActed: false
+    }));
 
     setDeck(newDeck);
     setPile([]);
     setSide([]);
     setPlayers(newPlayers);
     setVotes({});
-    
+
     // Only reset scores if it's the very first round
     if (!gameStarted) {
       if (numTeams > 1) {
         setGameScores(new Array(numTeams).fill(0));
       } else {
-        setGameScores(new Array(playerCount).fill(0));
+        setGameScores(new Array(count).fill(0));
       }
     }
-    
-    const nextLeader = gameStarted ? (roundLeaderIndex + 1) % playerCount : 0;
+
+    const nextLeader = gameStarted ? (roundLeaderIndex + 1) % count : 0;
     setRoundLeaderIndex(nextLeader);
     setTurnLeaderIndex(nextLeader);
     setCurrentPlayerIndex(nextLeader);
 
     // Compute interleaved turn order for team modes, rotated to start at the round leader.
-    const baseOrder = computeInterleavedOrder(playerCount, numTeams);
+    const baseOrder = computeInterleavedOrder(count, numTeams);
     const startPos = baseOrder.indexOf(nextLeader);
     const rotatedOrder = startPos >= 0
       ? [...baseOrder.slice(startPos), ...baseOrder.slice(0, startPos)]
@@ -397,8 +444,8 @@ export default function App() {
     setGameStarted(true);
     setLogs([]);
     addLog("--- NEW ROUND STARTED ---", 'SYSTEM');
-    showMessage("Round started. Your turn to flip a card.");
-  }, [playerCount, gameStarted, roundLeaderIndex, numTeams, addLog, showMessage]);
+    showMessage("Round started.");
+  }, [gameStarted, roundLeaderIndex, numTeams, addLog, showMessage]);
 
   const startTurn = useCallback(() => {
     if (deck.length === 0) {
@@ -812,6 +859,9 @@ export default function App() {
     setVotes({});
     setLastCapture(null);
     setTurnOrder([]);
+    setSetupStep(1);
+    setSetupSeats([]);
+    chosenPlayersRef.current = [];
   }, []);
 
   // CPU voting effect — module-level Set guards against re-render duplicates.
@@ -819,25 +869,69 @@ export default function App() {
     if (phase !== 'VOTING') return
     cpuVotesThisPhase.clear()
     const timer = setTimeout(async () => {
+      // Collect each CPU's choice locally so we can resolve without the stale
+      // `votes` closure (handleVote reads the closure value, not live state).
+      const roundVotes: Record<number, 'KEEP' | 'END'> = {};
+
       for (const p of players) {
         if (!p.isAI || cpuVotesThisPhase.has(p.id)) continue
         cpuVotesThisPhase.add(p.id)
 
         const inferState: InferenceState = {
           players, pile, side, deck, leadSuit, deferred,
-          currentPlayerIndex: p.id,  // each player votes in turn
+          currentPlayerIndex: p.id,
           turnOrder, turnLeaderIndex, lastChallengerId,
           turnActionCount, gameScores, targetScore, numTeams, phase, votes,
         }
 
+        let choice: 'KEEP' | 'END';
         try {
           const move = await getAIMove(p.name, inferState, p.id)
-          const choice = move.type === 'VOTE' ? move.choice : 'KEEP'
-          handleVote(p.id, choice)
+          choice = move.type === 'VOTE' ? move.choice : 'KEEP'
         } catch {
-          // Fallback to random vote on model error
-          handleVote(p.id, Math.random() > 0.5 ? 'KEEP' : 'END')
+          choice = Math.random() > 0.5 ? 'KEEP' : 'END'
         }
+        handleVote(p.id, choice)
+        roundVotes[p.id] = choice
+      }
+
+      // Spectator mode: no human player means handleVote's "all voted" check
+      // never fires (it builds newVotes from the stale empty-object closure).
+      // Resolve the vote here directly once all CPUs have cast their ballot.
+      const hasHuman = players.some(p => !p.isAI);
+      if (!hasHuman && Object.keys(roundVotes).length === players.length) {
+        const keepVotes = Object.values(roundVotes).filter(v => v === 'KEEP').length;
+        const endVotes  = Object.values(roundVotes).filter(v => v === 'END').length;
+
+        const keepNames = Object.entries(roundVotes).filter(([, v]) => v === 'KEEP').map(([id]) => players[Number(id)]?.name ?? '');
+        const endNames  = Object.entries(roundVotes).filter(([, v]) => v === 'END').map(([id]) => players[Number(id)]?.name ?? '');
+
+        let outcome: 'KEEP' | 'END';
+        let summaryMsg: string;
+        if (keepVotes > endVotes) {
+          outcome = 'KEEP';
+          summaryMsg = `Vote result: CONTINUE ${keepVotes} (${keepNames.join(', ')}) | END ROUND ${endVotes} (${endNames.join(', ')}) → CONTINUE wins`;
+        } else if (endVotes > keepVotes) {
+          outcome = 'END';
+          summaryMsg = `Vote result: CONTINUE ${keepVotes} (${keepNames.join(', ')}) | END ROUND ${endVotes} (${endNames.join(', ')}) → END ROUND wins`;
+        } else {
+          const flip = Math.random() > 0.5 ? 'KEEP' : 'END';
+          outcome = flip;
+          summaryMsg = `Vote result: Tied ${keepVotes}-${endVotes} → Coin flip decided: ${flip === 'KEEP' ? 'CONTINUE' : 'END ROUND'}`;
+        }
+
+        addLog(summaryMsg, 'SYSTEM');
+        addLog(outcome === 'KEEP' ? '--- ROUND CONTINUES ---' : '--- ROUND OVER ---', 'SYSTEM');
+
+        setTimeout(() => {
+          if (outcome === 'KEEP') {
+            setPhase('START');
+            showMessage("Vote: Continue playing! Players with no cards will pass.");
+          } else {
+            const isGameOver = calculateRoundScores(players, gameScores);
+            if (!isGameOver) setPhase('ROUND_OVER');
+          }
+        }, 2000);
       }
     }, 1000)
     return () => clearTimeout(timer)
@@ -911,6 +1005,11 @@ export default function App() {
 
   const sideTop = side.length > 0 ? side[side.length - 1] : null;
   const pileTop = pile.length > 0 ? pile[pile.length - 1] : null;
+
+  // Human player may be at any seat index (or absent in spectator mode)
+  const humanPlayerIdx = players.findIndex(p => !p.isAI);
+  const isSpectator = humanPlayerIdx === -1;
+  const humanPlayer = isSpectator ? undefined : players[humanPlayerIdx];
 
   // Adaptive scoreboard sizing based on player count
   const sbConfig = playerCount <= 2
@@ -1059,45 +1158,53 @@ export default function App() {
         <div className="border-r border-[#141414] flex flex-col p-2 bg-white/40 row-start-2 col-start-1">
             <div className="flex items-center gap-2 mb-1">
               <ArrowDownCircle size={14} className="text-amber-600" />
-              <span className="text-[10px] uppercase font-black">Your Hand</span>
+              <span className="text-[10px] uppercase font-black">{isSpectator ? 'Spectator Mode' : 'Your Hand'}</span>
             </div>
 
-            <div className="flex justify-center items-center gap-1 overflow-x-hidden py-1">
-              <AnimatePresence>
-                {players.length > 0 && players[0].hand.map((card, idx) => (
-                  <CardView 
-                    key={card.id} 
-                    card={card} 
-                    size={players[0].hand.length > 8 ? "xs" : players[0].hand.length > 5 ? "sm" : "md"}
-                    onClick={() => handleAction('PLAY', card)}
-                    disabled={phase !== 'ACTION' || currentPlayer?.isAI}
-                  />
-                ))}
-              </AnimatePresence>
-              {players.length > 0 && players[0].hand.length === 0 && phase !== 'VOTING' && (
-                <div className="flex items-center gap-2 opacity-20 italic text-xs">
-                  <AlertCircle size={14} /> No cards
+            {isSpectator ? (
+              <div className="flex-1 flex items-center justify-center text-[10px] uppercase font-black opacity-20 tracking-widest">
+                CPU controls all moves
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-center items-center gap-1 overflow-x-hidden py-1">
+                  <AnimatePresence>
+                    {players.length > 0 && humanPlayer && humanPlayer.hand.map((card) => (
+                      <CardView
+                        key={card.id}
+                        card={card}
+                        size={humanPlayer.hand.length > 8 ? "xs" : humanPlayer.hand.length > 5 ? "sm" : "md"}
+                        onClick={() => handleAction('PLAY', card)}
+                        disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
+                      />
+                    ))}
+                  </AnimatePresence>
+                  {players.length > 0 && humanPlayer && humanPlayer.hand.length === 0 && phase !== 'VOTING' && (
+                    <div className="flex items-center gap-2 opacity-20 italic text-xs">
+                      <AlertCircle size={14} /> No cards
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Actions */}
-            <div className="flex justify-center gap-2 mt-2">
-              <button 
-                disabled={phase !== 'ACTION' || currentPlayer?.isAI}
-                onClick={() => handleAction('DRAW')}
-                className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
-              >
-                Draw
-              </button>
-              <button 
-                disabled={phase !== 'ACTION' || currentPlayer?.isAI}
-                onClick={() => handleAction('PASS')}
-                className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
-              >
-                Pass
-              </button>
-            </div>
+                {/* Actions */}
+                <div className="flex justify-center gap-2 mt-2">
+                  <button
+                    disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
+                    onClick={() => handleAction('DRAW')}
+                    className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
+                  >
+                    Draw
+                  </button>
+                  <button
+                    disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
+                    onClick={() => handleAction('PASS')}
+                    className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
+                  >
+                    Pass
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
         {/* TOP-RIGHT: Scoreboard — row 1, col 2; height matches top-left via grid row */}
@@ -1274,24 +1381,28 @@ export default function App() {
               <h2 className="text-2xl font-serif italic font-black mb-2 uppercase tracking-tighter">Player Out of Cards</h2>
               <p className="text-sm mb-8 font-bold">A player has run out of cards. Keep playing (they'll pass each turn) or end the round now?</p>
 
-              <div className="grid grid-cols-2 gap-4">
-                <button
-                  disabled={votes[0] !== undefined}
-                  onClick={() => handleVote(0, 'KEEP')}
-                  className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
-                    ${votes[0] === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-amber-50'}`}
-                >
-                  Continue
-                </button>
-                <button 
-                  disabled={votes[0] !== undefined}
-                  onClick={() => handleVote(0, 'END')}
-                  className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
-                    ${votes[0] === 'END' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-red-50'}`}
-                >
-                  End Round
-                </button>
-              </div>
+              {isSpectator ? (
+                <div className="text-sm font-bold opacity-40 italic py-4">CPU players are voting…</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    disabled={votes[humanPlayerIdx] !== undefined}
+                    onClick={() => handleVote(humanPlayerIdx, 'KEEP')}
+                    className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
+                      ${votes[humanPlayerIdx] === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-amber-50'}`}
+                  >
+                    Continue
+                  </button>
+                  <button
+                    disabled={votes[humanPlayerIdx] !== undefined}
+                    onClick={() => handleVote(humanPlayerIdx, 'END')}
+                    className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
+                      ${votes[humanPlayerIdx] === 'END' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-red-50'}`}
+                  >
+                    End Round
+                  </button>
+                </div>
+              )}
 
               <div className="mt-8 space-y-2">
                 <p className="text-[10px] uppercase font-black opacity-40 mb-2">Voting Status</p>
@@ -1308,91 +1419,315 @@ export default function App() {
             </div>
           </motion.div>
         )}
-        {!gameStarted && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-[#E4E3E0]/90 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-          >
-            <div className="max-w-md w-full border-2 border-[#141414] bg-white p-8 text-center shadow-[10px_10px_0px_0px_#141414]">
-              <h2 className="text-4xl font-serif italic font-bold mb-4 tracking-tighter">DEFERENCE</h2>
-              <p className="text-sm mb-8 opacity-70 italic">Diamonds are for the clever.</p>
-              
-              <div className="space-y-6 mb-8 text-left">
-                {/* Player count */}
-                <div>
-                  <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Number of Players</label>
-                  <div className="flex gap-1.5">
-                    {[2, 3, 4, 5, 6, 7, 8].map(n => (
-                      <button
-                        key={n}
-                        onClick={() => {
-                          setPlayerCount(n);
-                          setNumTeams(1);
-                          setTargetScore(calcTargetScore(n, 1));
-                        }}
-                        className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${playerCount === n ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
-                      >
-                        {n}
-                      </button>
-                    ))}
+        {!gameStarted && (() => {
+          // --- Setup helpers (inline to access state) ---
+          const findSeatAtPoint = (x: number, y: number): number =>
+            seatSlotRefs.current.findIndex(ref => {
+              if (!ref) return false;
+              const r = ref.getBoundingClientRect();
+              return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+            });
+
+          const handleRosterDrop = (player: { name: string; isHuman: boolean }, px: number, py: number) => {
+            const target = findSeatAtPoint(px, py);
+            if (target < 0) return;
+            setSetupSeats(prev => {
+              const next = [...prev];
+              if (player.isHuman) next.forEach((s, i) => { if (s?.isHuman) next[i] = null; });
+              next[target] = { name: player.name, isHuman: player.isHuman };
+              return next;
+            });
+          };
+
+          const handleSeatDrop = (fromIdx: number, px: number, py: number) => {
+            const target = findSeatAtPoint(px, py);
+            setSetupSeats(prev => {
+              const next = [...prev];
+              const dragged = next[fromIdx];
+              if (!dragged) return prev;
+              if (target < 0) {
+                next[fromIdx] = null; // dragged to roster area → clear
+              } else if (target !== fromIdx) {
+                const tmp = next[target];
+                next[target] = dragged;
+                next[fromIdx] = tmp; // swap
+              }
+              return next;
+            });
+          };
+
+          const handleRandomize = () => {
+            const cpus = ROSTER_PLAYERS.filter(p => !p.isHuman);
+            const shuffled = [...cpus].sort(() => Math.random() - 0.5);
+            const humanSeat = Math.floor(Math.random() * playerCount);
+            const next: (SeatEntry | null)[] = Array.from({ length: playerCount }, (_, i) => {
+              if (i === humanSeat) return { name: 'You', isHuman: true };
+              const cpuIdx = i < humanSeat ? i : i - 1;
+              return { name: shuffled[cpuIdx % shuffled.length].name, isHuman: false };
+            });
+            setSetupSeats(next);
+          };
+
+          const handleStart = () => {
+            const configs = setupSeats.map(s => ({ name: s!.name, isAI: !s!.isHuman }));
+            chosenPlayersRef.current = configs;
+            setPlayerCount(setupSeats.length);
+            startRound(configs, setupSeats.length);
+          };
+
+          const allFilled = setupSeats.length === playerCount && setupSeats.every(Boolean);
+          const humanCount = setupSeats.filter(s => s?.isHuman).length;
+          const canStart = allFilled && humanCount <= 1;
+
+          // Seat card shown inside a seat slot
+          const SeatCard = ({ seatIdx }: { seatIdx: number }) => {
+            const seat = setupSeats[seatIdx];
+            if (!seat) return null;
+            const displayName = getDisplayName(setupSeats, seatIdx);
+            const rp = ROSTER_PLAYERS.find(r => r.name === seat.name);
+            return (
+              <motion.div
+                drag
+                dragSnapToOrigin
+                dragElastic={0.25}
+                whileDrag={{ scale: 1.08, zIndex: 200, opacity: 0.85 }}
+                onDragStart={() => setIsDraggingSetup(true)}
+                onDragEnd={(_, info) => { setIsDraggingSetup(false); handleSeatDrop(seatIdx, info.point.x, info.point.y); }}
+                className={`w-full flex items-center justify-between gap-1 px-2 py-1.5 cursor-grab active:cursor-grabbing
+                  ${seat.isHuman ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white text-[#141414]'}
+                  border border-[#141414] rounded select-none`}
+              >
+                <div className="flex flex-col min-w-0">
+                  <span className="text-[11px] font-black uppercase tracking-tight truncate leading-tight">{displayName}</span>
+                  <SkillBadge skill={rp?.skill ?? 'mid'} />
+                </div>
+                <button
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={() => setSetupSeats(prev => { const n = [...prev]; n[seatIdx] = null; return n; })}
+                  className={`shrink-0 text-[14px] leading-none opacity-40 hover:opacity-100 transition-opacity ml-1
+                    ${seat.isHuman ? 'text-[#E4E3E0]' : 'text-[#141414]'}`}
+                >
+                  ×
+                </button>
+              </motion.div>
+            );
+          };
+
+          return (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-[#E4E3E0]/95 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            >
+              <div className={`w-full border-2 border-[#141414] bg-white shadow-[10px_10px_0px_0px_#141414] flex flex-col overflow-hidden
+                ${setupStep === 1 ? 'max-w-md' : 'max-w-5xl h-[90vh]'}`}>
+
+                {/* Header */}
+                <div className="border-b border-[#141414] px-5 py-3 flex items-center justify-between bg-[#141414] text-[#E4E3E0] shrink-0">
+                  <div>
+                    <h2 className="text-lg font-serif italic font-bold tracking-tighter">DEFERENCE</h2>
+                    <p className="text-[9px] opacity-40 uppercase tracking-widest">Diamonds are for the clever.</p>
                   </div>
+                  <span className="text-[9px] uppercase font-black opacity-40 tracking-widest">Step {setupStep} / 2</span>
                 </div>
 
-                {/* Game mode — only for even counts with team options */}
-                {TEAM_MODES[playerCount] && (
-                  <div>
-                    <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Game Mode</label>
-                    <div className="flex gap-1.5 flex-wrap">
-                      {TEAM_MODES[playerCount].map(mode => (
+                {setupStep === 1 ? (
+                  /* ── STEP 1: Game Mode ── */
+                  <div className="p-8 flex flex-col gap-6">
+                    <div className="space-y-5">
+                      {/* Player count */}
+                      <div>
+                        <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Number of Players</label>
+                        <div className="flex gap-1.5">
+                          {[2, 3, 4, 5, 6, 7, 8].map(n => (
+                            <button
+                              key={n}
+                              onClick={() => { setPlayerCount(n); setNumTeams(1); setTargetScore(calcTargetScore(n, 1)); }}
+                              className={`flex-1 py-2 border border-[#141414] text-xs font-mono font-bold
+                                ${playerCount === n ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
+                            >{n}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Game mode */}
+                      {TEAM_MODES[playerCount] && (
+                        <div>
+                          <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Game Mode</label>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {TEAM_MODES[playerCount].map(mode => (
+                              <button
+                                key={mode.numTeams}
+                                onClick={() => { setNumTeams(mode.numTeams); setTargetScore(calcTargetScore(playerCount, mode.numTeams)); }}
+                                className={`flex-1 py-2 border border-[#141414] text-xs font-mono font-bold
+                                  ${numTeams === mode.numTeams ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
+                              >{mode.label}</button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Target score */}
+                      <div>
+                        <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">
+                          Target Score
+                          <span className="ml-2 normal-case opacity-70">⌈100 ÷ {numTeams > 1 ? numTeams : playerCount}⌉ + 2</span>
+                        </label>
+                        <div className="flex items-center gap-4">
+                          <input type="range" min="10" max="100" step="1" value={targetScore}
+                            onChange={e => setTargetScore(parseInt(e.target.value))}
+                            className="flex-1 accent-[#141414]" />
+                          <span className="font-mono font-bold text-xl w-12 text-center">{targetScore}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => { setSetupSeats(new Array(playerCount).fill(null)); setSetupStep(2); }}
+                      className="w-full py-4 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors"
+                    >
+                      Continue →
+                    </button>
+                  </div>
+                ) : (
+                  /* ── STEP 2: Player Selection ── */
+                  <div className="flex-1 flex overflow-hidden">
+
+                    {/* Left panel: roster */}
+                    <div className="w-44 shrink-0 border-r border-[#141414] flex flex-col overflow-hidden">
+                      <div className="px-3 pt-3 pb-1 shrink-0">
+                        <p className="text-[9px] uppercase font-black opacity-40 tracking-widest">Roster</p>
+                        <p className="text-[8px] opacity-30 mt-0.5">Drag to a seat →</p>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+                        {ROSTER_PLAYERS.map(player => (
+                          <motion.div
+                            key={player.name}
+                            drag
+                            dragSnapToOrigin
+                            dragElastic={0.25}
+                            whileDrag={{ scale: 1.08, zIndex: 200, opacity: 0.85 }}
+                            onDragStart={() => setIsDraggingSetup(true)}
+                            onDragEnd={(_, info) => { setIsDraggingSetup(false); handleRosterDrop(player, info.point.x, info.point.y); }}
+                            className={`flex items-center justify-between gap-2 px-2.5 py-2 border border-[#141414] rounded
+                              cursor-grab active:cursor-grabbing select-none
+                              ${player.isHuman
+                                ? 'bg-[#141414] text-[#E4E3E0]'
+                                : humanCount > 0 && player.isHuman ? 'opacity-40' : 'bg-white hover:bg-zinc-50'}`}
+                          >
+                            <div className="flex flex-col min-w-0">
+                              <span className="text-[11px] font-black uppercase tracking-tight truncate leading-tight">
+                                {player.isHuman ? 'You' : player.name}
+                              </span>
+                              <SkillBadge skill={player.skill} />
+                            </div>
+                            {player.isHuman
+                              ? <User size={11} className="shrink-0 opacity-60" />
+                              : <Cpu size={11} className="shrink-0 opacity-30" />}
+                          </motion.div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Right panel: seat grid */}
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                      <div className="px-4 pt-3 pb-1 flex items-center justify-between shrink-0">
+                        <div>
+                          <p className="text-[9px] uppercase font-black opacity-40 tracking-widest">Seats</p>
+                          <p className="text-[8px] opacity-30 mt-0.5">
+                            {allFilled
+                              ? humanCount === 0 ? 'Spectator mode — no human placed' : 'Ready to start'
+                              : `${setupSeats.filter(Boolean).length} / ${playerCount} filled`}
+                          </p>
+                        </div>
                         <button
-                          key={mode.numTeams}
-                          onClick={() => {
-                            setNumTeams(mode.numTeams);
-                            setTargetScore(calcTargetScore(playerCount, mode.numTeams));
-                          }}
-                          className={`flex-1 py-2 border border-[#141414] text-xs font-mono ${numTeams === mode.numTeams ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
+                          onClick={handleRandomize}
+                          className="text-[9px] uppercase font-black border border-[#141414] px-2 py-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors rounded"
                         >
-                          {mode.label}
+                          {setupSeats.some(Boolean) ? 'Reshuffle' : 'Random'}
                         </button>
-                      ))}
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto p-3">
+                        {numTeams > 1 ? (
+                          /* Team mode: grouped by team */
+                          <div className="space-y-3">
+                            {Array.from({ length: numTeams }, (_, teamIdx) => {
+                              const teamSize = Math.floor(playerCount / numTeams);
+                              const tc = TEAM_COLOR_CLASSES[teamIdx % TEAM_COLOR_CLASSES.length];
+                              return (
+                                <div key={teamIdx} className={`border-2 ${tc.border} rounded-lg p-2.5`}>
+                                  <p className={`text-[9px] uppercase font-black mb-2 ${tc.text}`}>Team {teamIdx + 1}</p>
+                                  <div className="grid grid-cols-2 gap-1.5">
+                                    {Array.from({ length: teamSize }, (_, j) => {
+                                      const seatIdx = teamIdx * teamSize + j;
+                                      const isHighlit = isDraggingSetup && !setupSeats[seatIdx];
+                                      return (
+                                        <div
+                                          key={seatIdx}
+                                          ref={el => { seatSlotRefs.current[seatIdx] = el; }}
+                                          className={`min-h-[52px] border rounded flex items-center p-1 transition-colors
+                                            ${isHighlit ? `${tc.border} ${tc.bg} border-2` : 'border-[#141414]/20 bg-white/60'}
+                                            ${!setupSeats[seatIdx] ? 'border-dashed' : ''}`}
+                                        >
+                                          {setupSeats[seatIdx]
+                                            ? <SeatCard seatIdx={seatIdx} />
+                                            : <span className="text-[9px] uppercase opacity-20 font-black w-full text-center">Empty</span>}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          /* FFA: simple grid */
+                          <div className={`grid gap-2 ${playerCount <= 4 ? 'grid-cols-2' : playerCount <= 6 ? 'grid-cols-3' : 'grid-cols-4'}`}>
+                            {Array.from({ length: playerCount }, (_, seatIdx) => {
+                              const isHighlit = isDraggingSetup && !setupSeats[seatIdx];
+                              return (
+                                <div
+                                  key={seatIdx}
+                                  ref={el => { seatSlotRefs.current[seatIdx] = el; }}
+                                  className={`min-h-[56px] border rounded flex items-center p-1.5 transition-colors
+                                    ${isHighlit ? 'border-[#141414] bg-amber-50 border-2' : 'border-[#141414]/20 bg-white/60'}
+                                    ${!setupSeats[seatIdx] ? 'border-dashed' : ''}`}
+                                >
+                                  {setupSeats[seatIdx]
+                                    ? <SeatCard seatIdx={seatIdx} />
+                                    : <span className="text-[9px] uppercase opacity-20 font-black w-full text-center">Empty</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Footer: back + start */}
+                      <div className="border-t border-[#141414] p-3 flex gap-2 shrink-0">
+                        <button
+                          onClick={() => setSetupStep(1)}
+                          className="py-2 px-4 border border-[#141414] text-[10px] font-black uppercase hover:bg-zinc-100 transition-colors rounded"
+                        >
+                          ← Back
+                        </button>
+                        <button
+                          disabled={!canStart}
+                          onClick={handleStart}
+                          className="flex-1 py-2 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors disabled:opacity-30 rounded"
+                        >
+                          {humanCount === 0 ? 'Watch (Spectator)' : 'Start Game'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
-
-                {/* Target score */}
-                <div>
-                  <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">
-                    Target Score
-                    <span className="ml-2 normal-case opacity-70">
-                      ⌈100 ÷ {numTeams > 1 ? numTeams : playerCount}⌉ + 2
-                    </span>
-                  </label>
-                  <div className="flex items-center gap-4">
-                    <input
-                      type="range"
-                      min="10"
-                      max="100"
-                      step="1"
-                      value={targetScore}
-                      onChange={(e) => setTargetScore(parseInt(e.target.value))}
-                      className="flex-1 accent-[#141414]"
-                    />
-                    <span className="font-mono font-bold text-xl w-12 text-center">{targetScore}</span>
-                  </div>
-                </div>
               </div>
-
-              <button 
-                onClick={startRound}
-                className="w-full py-4 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors"
-              >
-                Initialize Operation
-              </button>
-            </div>
-          </motion.div>
-        )}
+            </motion.div>
+          );
+        })()}
 
         {phase === 'ROUND_OVER' && (
           <motion.div
@@ -1431,7 +1766,7 @@ export default function App() {
                   </p>
                 )}
                 <button
-                  onClick={startRound}
+                  onClick={() => startRound()}
                   className="w-full py-4 bg-[#E4E3E0] text-[#141414] font-bold uppercase tracking-widest hover:bg-white transition-colors flex items-center justify-center gap-2 mt-auto"
                 >
                   <RotateCcw size={18} /> Start Next Round
