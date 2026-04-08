@@ -163,6 +163,80 @@ const QUOTES: Record<string, Record<QuoteEvent, string[]>> = {
   },
 };
 
+export const TIE_GAME_QUOTES: Record<string, string[]> = {
+  You: [
+    "You didn't win. You didn't lose. You held the line.",
+    "A deadlock. Nobody takes the pile. Nobody takes the crown.",
+    "You matched them move for move. No separation.",
+    "No winner. Just tension unresolved.",
+    "You stopped the game from choosing.",
+    "Balance, for once. Nobody walks away ahead.",
+    "You refused to break. They couldn't either.",
+    "A draw. Not failure — containment.",
+    "You met them exactly where they stood.",
+    "No one proved more. No one proved less.",
+  ],
+  Jane: [
+    "In chess, a tie is worth half a point.",
+    "Longest chess game on record: 269 moves, 20+ hours... and it ended in a draw.",
+    "A perfect stalemate — every move answered, every play matched.",
+    "No edge found, no ground lost. That's as even as it gets.",
+    "Skill met skill and refused to give way.",
+    "A deadlock like this usually means both sides played it just right.",
+    "Sometimes the best outcome is proving you're equals.",
+    "We reach our denouement — Pay deference and carry on.",
+    "And the Joker never came — A tie also wins the game.",
+  ],
+  Noema: [
+    "A perfect mirror image — you two are exactly as good as each other.",
+    "You pushed each other to the same finish line — impressive symmetry.",
+    "You cancelled each other out in the most impressive way.",
+    "Neither of you blinked — that's why the scoreboard couldn't either.",
+    "Harmony on the scoreboard: a perfect balance of skill.",
+  ],
+  Fabi: [
+    "A tie means the game was too good for anyone to lose.",
+    "Why settle for one winner when you can have two?",
+    "Friends to the end — not even the score could pull you apart.",
+    "Call it a draw, call it respect — either way, well played.",
+    "No winner, but plenty of quality on display.",
+    "Double the winners, zero losers. Now that's a result.",
+  ],
+  Barney: [
+    "They say a tie is like kissing your sister. How's it feel, Kingslayer?",
+    "We didn't lose; we just ran out of time to win.",
+    "A tie is just a win that hasn't made up its mind yet.",
+    "Great minds play alike!",
+  ],
+  Zane: [
+    "If we all tied, then we'd all be in first!",
+    "Why pick a winner when chaos says everyone wins?",
+    "You both broke the game so hard it couldn't decide.",
+    "Hot off the press: Harvard Beats Yale 29-29.",
+  ],
+  Uncle: [
+    "A famous 0-0 tie: Army vs. Notre Dame in 1946 — one of the greatest games ever played.",
+    "Instant classic, just like when the Panthers tied the Bengals at 37 back in '14.",
+    "Soccer is the greatest game in the world, because of the tie.",
+    "Back in my day, a tie like this meant both sides earned it.",
+  ],
+  Lucy: [
+    "If we all tied every match like you just did, we'd all be sitting in first place together.",
+    "No losers, just two winners sharing the spotlight.",
+    "Great minds play alike!",
+    "That's what happens when two great players meet.",
+    "Everyone walks away proud of that one.",
+  ],
+};
+
+export function getTieGameQuote(players: { name: string; isAI: boolean }[]): { speaker: string; quote: string } {
+  const speaker = players[Math.floor(Math.random() * players.length)];
+  const key = speaker.isAI ? speaker.name : 'You';
+  // Fall back to base name for duplicates (e.g. "Noema A" → "Noema")
+  const list = TIE_GAME_QUOTES[key] ?? TIE_GAME_QUOTES[key.split(' ')[0]] ?? TIE_GAME_QUOTES['You'];
+  return { speaker: speaker.isAI ? speaker.name : 'You', quote: pick(list) };
+}
+
 const TIE_QUOTES: string[] = [
   "A draw? Fitting.",
   "Nobody wins, nobody loses. How boring.",

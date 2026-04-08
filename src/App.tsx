@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { loadAllPlayers, getAIMove, type InferenceState } from './aiInference'
-import { getQuote, getTieQuote } from './quotes';
+import { getQuote, getTieQuote, getTieGameQuote } from './quotes';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Trophy,
@@ -210,7 +210,7 @@ const TEAM_COLOR_CLASSES = [
 const SkillBadge = ({ skill }: { skill: SkillLevel }) => {
   if (skill === 'human') return <span className="text-[9px] font-black uppercase opacity-50 tracking-wider">HUMAN</span>;
   const stars = skill === 'expert' ? '★★★' : skill === 'mid' ? '★★☆' : '★☆☆';
-  const color = skill === 'expert' ? 'text-amber-500' : skill === 'mid' ? 'text-zinc-400' : 'text-zinc-300';
+  const color = skill === 'expert' ? 'text-amber-500' : skill === 'mid' ? 'text-zinc-500' : 'text-zinc-500';
   return <span className={`text-[11px] font-mono leading-none ${color}`}>{stars}</span>;
 };
 
@@ -336,6 +336,7 @@ export default function App() {
   const turnQuoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [roundWinQuote, setRoundWinQuote] = useState<{ name: string; quote: string } | null>(null);
   const [winGameQuote, setWinGameQuote] = useState<string | null>(null);
+  const [tieGameQuote, setTieGameQuote] = useState<{ speaker: string; quote: string } | null>(null);
 
   // --- Setup flow state ---
   const [setupStep, setSetupStep] = useState<1 | 2>(1);
@@ -343,6 +344,7 @@ export default function App() {
   const chosenPlayersRef = useRef<{ name: string; isAI: boolean }[]>([]);
   const seatSlotRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [isDraggingSetup, setIsDraggingSetup] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
 
   const addLog = useCallback((msg: string, type: 'PLAYER' | 'CPU' | 'SYSTEM' = 'SYSTEM') => {
     setLogs(prev => {
@@ -486,6 +488,12 @@ export default function App() {
       setTurnActionCount(0);
       addLog(`${currentPlayer?.name} flipped ${getRankLabel(flipped.rank)}${getSuitIcon(flipped.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
       showMessage(`Lead suit is ${getSuitIcon(flipped.suit)}. Choose an action.`);
+      // TRIGGER 1 — Ten of hearts flipped from stack
+      if (flipped.rank === Rank.TEN && flipped.suit === Suit.HEARTS && currentPlayer) {
+        const q = "Ten of hearts flips on the pile";
+        addLog(q, 'SYSTEM');
+        showTurnQuote(currentPlayer.name, q);
+      }
     }
   }, [deck, pile, side, currentPlayerIndex, players, currentPlayer, turnOrder, addLog, showMessage]);
 
@@ -606,17 +614,25 @@ export default function App() {
     if (newGameScores.some(s => s >= targetScore)) {
       setPhase('GAME_OVER');
       const maxScore = Math.max(...newGameScores);
-      const winnerIdx = newGameScores.indexOf(maxScore);
-      setWinner(winnerIdx);
+      const winnerIndices = newGameScores.reduce((acc: number[], s, i) => s === maxScore ? [...acc, i] : acc, []);
+      const isTie = winnerIndices.length > 1;
 
-      if (numTeams > 1) {
-        addLog(`GAME OVER! Team ${winnerIdx + 1} wins!`);
-        const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winnerIdx);
-        const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
-        if (speaker) setWinGameQuote(getQuote(speaker.name, 'WIN_GAME'));
+      if (isTie) {
+        addLog(`GAME OVER! Tie between ${winnerIndices.map(i => numTeams > 1 ? `Team ${i + 1}` : currentPlayers[i].name).join(' and ')}!`);
+        setWinner(null);
+        setTieGameQuote(getTieGameQuote(currentPlayers));
       } else {
-        addLog(`GAME OVER! ${currentPlayers[winnerIdx].name} wins!`);
-        setWinGameQuote(getQuote(currentPlayers[winnerIdx].name, 'WIN_GAME'));
+        const winnerIdx = winnerIndices[0];
+        setWinner(winnerIdx);
+        if (numTeams > 1) {
+          addLog(`GAME OVER! Team ${winnerIdx + 1} wins!`);
+          const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winnerIdx);
+          const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
+          if (speaker) setWinGameQuote(getQuote(speaker.name, 'WIN_GAME'));
+        } else {
+          addLog(`GAME OVER! ${currentPlayers[winnerIdx].name} wins!`);
+          setWinGameQuote(getQuote(currentPlayers[winnerIdx].name, 'WIN_GAME'));
+        }
       }
       return true; // Game is over
     }
@@ -684,6 +700,12 @@ export default function App() {
         setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: 'JKR', red: false } }));
         addLog(`${currentPlayer?.name} played Joker!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
         showMessage(`${currentPlayer?.name} played a Joker — wins the pile!`, 'success');
+        // TRIGGER 5 — Joker played
+        if (currentPlayer) {
+          const q = "But we are all still dead afraid if a Joker should be played";
+          addLog(q, 'SYSTEM');
+          showTurnQuote(currentPlayer.name, q);
+        }
         turnEndedByJoker = true;
       } else if (isRankMatch) {
         // Suit Switch: Merge side into pile and reset challengers
@@ -698,12 +720,33 @@ export default function App() {
         setLastAction(prev => ({ ...prev, [currentPlayerIndex]: { label: getRankLabel(card.rank) + getSuitIcon(card.suit), red: card.suit === Suit.HEARTS || card.suit === Suit.DIAMONDS } }));
         addLog(`${currentPlayer?.name} matched rank ${getRankLabel(card.rank)} and Suit Switched to ${getSuitIcon(card.suit)}`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
         showMessage(`${currentPlayer?.name} Suit Switched to ${getSuitIcon(card.suit)}!`);
+        // TRIGGER 3 — Ten of spades suit switch
+        if (card.rank === Rank.TEN && card.suit === Suit.SPADES && currentPlayer) {
+          const q = "The ten of spades is played. The leading suit is changed";
+          addLog(q, 'SYSTEM');
+          showTurnQuote(currentPlayer.name, q);
+        }
       } else {
         // Lead suit play or Diamond Defer
         if (isDiamond && !isLeadSuit && !deferred) {
           setDeferred(true);
           addLog(`${currentPlayer?.name} deferred the pile.`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
           showMessage(`${currentPlayer?.name} deferred the pile!`, 'warning');
+          // TRIGGER 4 — Diamond defer
+          if (currentPlayer) {
+            const opts = [
+              "Follow suit, if suit you hold. If you can't, a diamond's bold",
+              "Play a diamond if you prefer. Then the pile will be deferred",
+              "The pile builds. The stakes grow higher. It's coming down to the wire.",
+              "Play a diamond — lock the fight. No one wins the pile tonight",
+              "Knowing when to step aside. Knowing when to let it ride",
+              "Knowing when a moment is still too small to claim",
+              "The clever play is not to take the pile",
+            ];
+            const q = opts[Math.floor(Math.random() * opts.length)];
+            addLog(q, 'SYSTEM');
+            showTurnQuote(currentPlayer.name, q);
+          }
         }
 
         const sideTop = side.length > 0 ? side[side.length - 1] : null;
@@ -784,7 +827,14 @@ export default function App() {
     if (canWin && lastChallengerId !== null) {
       addLog(`${players[lastChallengerId].name} won the pile (${pile.length + side.length} cards).`);
       showMessage(`${players[lastChallengerId].name} won the pile!`, 'success');
-      showTurnQuote(players[lastChallengerId].name, getQuote(players[lastChallengerId].name, 'WIN_TURN'));
+      // TRIGGER 2 — Jack wins the pile (sideTop is the winning card)
+      if (sideTop && sideTop.rank === Rank.JACK) {
+        const q = "Jack is played with a smile";
+        addLog(q, 'SYSTEM');
+        showTurnQuote(players[lastChallengerId].name, q);
+      } else {
+        showTurnQuote(players[lastChallengerId].name, getQuote(players[lastChallengerId].name, 'WIN_TURN'));
+      }
       const allCards = [...pile, ...side];
       setLastCapture({ playerName: players[lastChallengerId].name, count: allCards.length });
       
@@ -851,6 +901,7 @@ export default function App() {
     setMessage('');
     setMessageType('info');
     setWinner(null);
+    setTieGameQuote(null);
     setLastChallengerId(null);
     setGameStarted(false);
     setRoundLeaderIndex(0);
@@ -1680,7 +1731,7 @@ export default function App() {
                 <div className="border-b border-[#141414] px-5 py-3 flex items-center justify-between bg-[#141414] text-[#E4E3E0] shrink-0">
                   <div>
                     <h2 className="text-lg font-serif italic font-bold tracking-tighter">DEFERENCE</h2>
-                    <p className="text-[9px] opacity-40 uppercase tracking-widest">Diamonds are for the clever.</p>
+                    <p className="text-[9px] text-red-500 uppercase tracking-widest font-bold">Diamonds are for the clever.</p>
                   </div>
                   <span className="text-[9px] uppercase font-black opacity-40 tracking-widest">Step {setupStep} / 2</span>
                 </div>
@@ -1736,6 +1787,59 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Collapsible rules */}
+                    <div className="border border-[#141414]/20 rounded">
+                      <button
+                        onClick={() => setRulesOpen(o => !o)}
+                        className="w-full flex justify-between items-center px-3 py-2 text-[10px] font-black uppercase tracking-widest hover:bg-zinc-50 transition-colors"
+                      >
+                        <span>How to Play</span>
+                        <span className="opacity-50">{rulesOpen ? '▲' : '▼'}</span>
+                      </button>
+                      <AnimatePresence initial={false}>
+                        {rulesOpen && (
+                          <motion.div
+                            key="rules"
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-3 pb-4 pt-1 space-y-3 border-t border-[#141414]/10 text-left">
+                              {[
+                                {
+                                  heading: 'Objective',
+                                  body: 'Reach the target score before your opponents.\nScore = cards captured − cards left in hand at round end.',
+                                },
+                                {
+                                  heading: 'Each Turn',
+                                  body: 'The active player flips a card from the stack — this sets the lead suit. Then each player must play a card, draw, or pass.',
+                                },
+                                {
+                                  heading: 'Playing a Card',
+                                  body: 'Follow lead suit, with exceptions:\n• No lead suit? Play a Diamond (defers the pile) or match the rank (suit switch).\n• Joker beats everything and wins the pile instantly.',
+                                },
+                                {
+                                  heading: 'Winning the Pile',
+                                  body: 'The highest lead-suit card wins. If the pile was deferred with a Diamond, only a Joker can win it that turn.',
+                                },
+                                {
+                                  heading: 'Voting',
+                                  body: 'When a player runs out of cards, everyone votes:\nCONTINUE — keep playing, empty-handed player draws or passes.\nEND ROUND — score immediately.',
+                                },
+                              ].map(({ heading, body }) => (
+                                <div key={heading}>
+                                  <p className="text-[9px] font-black uppercase tracking-widest mb-0.5">{heading}</p>
+                                  <p className="text-[11px] opacity-60 leading-snug whitespace-pre-line">{body}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
                     <button
                       onClick={() => { setSetupSeats(new Array(playerCount).fill(null)); setSetupStep(2); }}
                       className="w-full py-4 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors"
@@ -1750,8 +1854,8 @@ export default function App() {
                     {/* Left panel: roster */}
                     <div className="w-44 shrink-0 border-r border-[#141414] flex flex-col overflow-hidden">
                       <div className="px-3 pt-3 pb-1 shrink-0">
-                        <p className="text-[9px] uppercase font-black opacity-40 tracking-widest">Roster</p>
-                        <p className="text-[8px] opacity-30 mt-0.5">Drag to a seat →</p>
+                        <p className="text-[9px] uppercase font-black text-[#141414] tracking-widest">Roster</p>
+                        <p className="text-[8px] text-gray-600 mt-0.5">Drag to a seat →</p>
                       </div>
                       <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
                         {ROSTER_PLAYERS.map(player => (
@@ -1763,11 +1867,11 @@ export default function App() {
                             whileDrag={{ scale: 1.08, zIndex: 200, opacity: 0.85 }}
                             onDragStart={() => setIsDraggingSetup(true)}
                             onDragEnd={(_, info) => { setIsDraggingSetup(false); handleRosterDrop(player, info.point.x, info.point.y); }}
-                            className={`flex items-center justify-between gap-2 px-2.5 py-2 border border-[#141414] rounded
+                            className={`flex items-center justify-between gap-2 px-2.5 py-2 border rounded
                               cursor-grab active:cursor-grabbing select-none
                               ${player.isHuman
-                                ? 'bg-[#141414] text-[#E4E3E0]'
-                                : humanCount > 0 && player.isHuman ? 'opacity-40' : 'bg-white hover:bg-zinc-50'}`}
+                                ? 'bg-[#141414] text-[#E4E3E0] border-[#141414]'
+                                : 'bg-white hover:bg-zinc-50 border-gray-800 text-[#141414]'}`}
                           >
                             <div className="flex flex-col min-w-0">
                               <span className="text-[11px] font-black uppercase tracking-tight truncate leading-tight">
@@ -1777,7 +1881,7 @@ export default function App() {
                             </div>
                             {player.isHuman
                               ? <User size={11} className="shrink-0 opacity-60" />
-                              : <Cpu size={11} className="shrink-0 opacity-30" />}
+                              : <Cpu size={11} className="shrink-0 opacity-50" />}
                           </motion.div>
                         ))}
                       </div>
@@ -1787,8 +1891,8 @@ export default function App() {
                     <div className="flex-1 flex flex-col overflow-hidden">
                       <div className="px-4 pt-3 pb-1 flex items-center justify-between shrink-0">
                         <div>
-                          <p className="text-[9px] uppercase font-black opacity-40 tracking-widest">Seats</p>
-                          <p className="text-[8px] opacity-30 mt-0.5">
+                          <p className="text-[9px] uppercase font-black text-[#141414] tracking-widest">Seats</p>
+                          <p className="text-[10px] font-bold text-[#141414] mt-0.5">
                             {allFilled
                               ? humanCount === 0 ? 'Spectator mode — no human placed' : 'Ready to start'
                               : `${setupSeats.filter(Boolean).length} / ${playerCount} filled`}
@@ -1796,7 +1900,7 @@ export default function App() {
                         </div>
                         <button
                           onClick={handleRandomize}
-                          className="text-[9px] uppercase font-black border border-[#141414] px-2 py-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors rounded"
+                          className="text-[9px] uppercase font-black border-2 border-[#141414] text-[#141414] px-3 py-1.5 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors rounded"
                         >
                           {setupSeats.some(Boolean) ? 'Reshuffle' : 'Random'}
                         </button>
@@ -1821,12 +1925,12 @@ export default function App() {
                                           key={seatIdx}
                                           ref={el => { seatSlotRefs.current[seatIdx] = el; }}
                                           className={`min-h-[52px] border rounded flex items-center p-1 transition-colors
-                                            ${isHighlit ? `${tc.border} ${tc.bg} border-2` : 'border-[#141414]/20 bg-white/60'}
+                                            ${isHighlit ? `${tc.border} ${tc.bg} border-2` : !setupSeats[seatIdx] ? 'border-black/50 bg-gray-50' : 'border-[#141414]/20 bg-white/60'}
                                             ${!setupSeats[seatIdx] ? 'border-dashed' : ''}`}
                                         >
                                           {setupSeats[seatIdx]
                                             ? <SeatCard seatIdx={seatIdx} />
-                                            : <span className="text-[9px] uppercase opacity-20 font-black w-full text-center">Empty</span>}
+                                            : <span className="text-[10px] uppercase font-bold text-[#141414] w-full text-center">Empty</span>}
                                         </div>
                                       );
                                     })}
@@ -1845,12 +1949,12 @@ export default function App() {
                                   key={seatIdx}
                                   ref={el => { seatSlotRefs.current[seatIdx] = el; }}
                                   className={`min-h-[56px] border rounded flex items-center p-1.5 transition-colors
-                                    ${isHighlit ? 'border-[#141414] bg-amber-50 border-2' : 'border-[#141414]/20 bg-white/60'}
+                                    ${isHighlit ? 'border-[#141414] bg-amber-50 border-2' : !setupSeats[seatIdx] ? 'border-black/50 bg-gray-50' : 'border-[#141414]/20 bg-white/60'}
                                     ${!setupSeats[seatIdx] ? 'border-dashed' : ''}`}
                                 >
                                   {setupSeats[seatIdx]
                                     ? <SeatCard seatIdx={seatIdx} />
-                                    : <span className="text-[9px] uppercase opacity-20 font-black w-full text-center">Empty</span>}
+                                    : <span className="text-[10px] uppercase font-bold text-[#141414] w-full text-center">Empty</span>}
                                 </div>
                               );
                             })}
@@ -1858,18 +1962,30 @@ export default function App() {
                         )}
                       </div>
 
+                      {/* Poem */}
+                      <div className="px-4 pb-2 pt-3 border-t border-black/20 shrink-0">
+                        <p className="text-base italic text-[#141414] leading-relaxed">
+                          Flip the stack — the suit is led<br />
+                          Play a card or draw instead<br />
+                          Follow suit, if suit you hold<br />
+                          If you can't, a diamond's bold<br />
+                          Match the rank — the suit will change<br />
+                          Turn the table, rearrange
+                        </p>
+                      </div>
+
                       {/* Footer: back + start */}
                       <div className="border-t border-[#141414] p-3 flex gap-2 shrink-0">
                         <button
                           onClick={() => setSetupStep(1)}
-                          className="py-2 px-4 border border-[#141414] text-[10px] font-black uppercase hover:bg-zinc-100 transition-colors rounded"
+                          className="py-2 px-4 border-2 border-[#141414] text-[#141414] text-[10px] font-black uppercase hover:bg-zinc-100 transition-colors rounded"
                         >
                           ← Back
                         </button>
                         <button
                           disabled={!canStart}
                           onClick={handleStart}
-                          className="flex-1 py-2 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors disabled:opacity-30 rounded"
+                          className="flex-1 py-2 bg-[#141414] text-[#E4E3E0] font-bold uppercase tracking-widest hover:bg-zinc-800 transition-colors disabled:opacity-40 rounded"
                         >
                           {humanCount === 0 ? 'Watch (Spectator)' : 'Start Game'}
                         </button>
@@ -1964,21 +2080,37 @@ export default function App() {
             className="fixed inset-0 bg-[#141414] z-50 flex items-center justify-center p-4"
           >
             <div className="w-full max-w-3xl flex gap-6 h-[80vh]">
-              {/* Left — Victory panel */}
+              {/* Left — Victory / Tie panel */}
               <div className="w-72 shrink-0 border-2 border-[#E4E3E0] bg-[#141414] text-[#E4E3E0] p-8 text-center flex flex-col justify-center">
-                <Trophy size={64} className="mx-auto mb-6 text-amber-500" />
-                <h2 className="text-4xl font-serif italic font-bold mb-2 uppercase">Victory</h2>
-                <p className="text-lg font-mono mb-4">
-                  {winner !== null
-                    ? (numTeams > 1
-                        ? `Team ${winner + 1} has reached the target score!`
-                        : players[winner].isAI
-                          ? `${players[winner].name} has reached the target score!`
-                          : 'You have reached the target score!')
-                    : 'Game over!'}
-                </p>
-                {winGameQuote && (
-                  <p className="text-amber-400 italic font-serif text-lg mb-6 leading-snug">"{winGameQuote}"</p>
+                {tieGameQuote ? (
+                  <>
+                    <div className="mx-auto mb-6 w-16 h-16 border-2 border-amber-400 rounded-full flex items-center justify-center">
+                      <span className="text-amber-400 text-2xl font-black">=</span>
+                    </div>
+                    <h2 className="text-4xl font-serif italic font-bold mb-2 uppercase text-amber-400">Deadlock</h2>
+                    <p className="text-sm font-mono mb-6 opacity-60">The scores are level. No one breaks away.</p>
+                    <div className="border border-amber-400/40 rounded-lg p-4 mb-6">
+                      <p className="text-[9px] uppercase font-black tracking-widest text-amber-400 mb-2">{tieGameQuote.speaker}</p>
+                      <p className="text-amber-300 italic font-serif text-base leading-snug">"{tieGameQuote.quote}"</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Trophy size={64} className="mx-auto mb-6 text-amber-500" />
+                    <h2 className="text-4xl font-serif italic font-bold mb-2 uppercase">Victory</h2>
+                    <p className="text-lg font-mono mb-4">
+                      {winner !== null
+                        ? (numTeams > 1
+                            ? `Team ${winner + 1} has reached the target score!`
+                            : players[winner].isAI
+                              ? `${players[winner].name} has reached the target score!`
+                              : 'You have reached the target score!')
+                        : 'Game over!'}
+                    </p>
+                    {winGameQuote && (
+                      <p className="text-amber-400 italic font-serif text-lg mb-6 leading-snug">"{winGameQuote}"</p>
+                    )}
+                  </>
                 )}
                 <div className="space-y-2 mb-8 opacity-70 text-sm">
                   {numTeams > 1 ? (
