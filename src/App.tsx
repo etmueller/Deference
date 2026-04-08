@@ -1013,12 +1013,12 @@ export default function App() {
 
   // Adaptive scoreboard sizing based on player count
   const sbConfig = playerCount <= 2
-    ? { scoreSz: 'text-3xl',     nameSz: 'text-sm',     pad: 'px-3 py-2.5',   statSz: 'text-[13px]', useGrid: false }
+    ? { scoreSz: 'text-3xl',     nameSz: 'text-sm',     pad: 'px-3 py-3',     statSz: 'text-[15px]', useGrid: false }
     : playerCount <= 4
-    ? { scoreSz: 'text-[28px]',  nameSz: 'text-sm',     pad: 'px-2 py-2',     statSz: 'text-[13px]', useGrid: false }
+    ? { scoreSz: 'text-[28px]',  nameSz: 'text-sm',     pad: 'px-2 py-2.5',   statSz: 'text-[14px]', useGrid: false }
     : playerCount <= 5
-    ? { scoreSz: 'text-2xl',     nameSz: 'text-xs',     pad: 'px-2 py-1.5',   statSz: 'text-[11px]', useGrid: false }
-    : { scoreSz: 'text-xl',      nameSz: 'text-[10px]', pad: 'px-1.5 py-1',   statSz: 'text-[10px]', useGrid: true  };
+    ? { scoreSz: 'text-2xl',     nameSz: 'text-xs',     pad: 'px-2 py-2',     statSz: 'text-[13px]', useGrid: false }
+    : { scoreSz: 'text-xl',      nameSz: 'text-[10px]', pad: 'px-1.5 py-1.5', statSz: 'text-[12px]', useGrid: true  };
 
   return (
     <div className="h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0] flex flex-col overflow-hidden">
@@ -1167,38 +1167,55 @@ export default function App() {
               </div>
             ) : (
               <>
-                <div className="flex justify-center items-center gap-1 overflow-x-hidden py-1">
-                  <AnimatePresence>
-                    {players.length > 0 && humanPlayer && humanPlayer.hand.map((card) => (
-                      <CardView
-                        key={card.id}
-                        card={card}
-                        size={humanPlayer.hand.length > 8 ? "xs" : humanPlayer.hand.length > 5 ? "sm" : "md"}
-                        onClick={() => handleAction('PLAY', card)}
-                        disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
-                      />
-                    ))}
-                  </AnimatePresence>
+                {/* Mobile: 3-col grid. Desktop: single row. */}
+                <div className="py-1">
+                  <div className="grid grid-cols-3 gap-1 md:hidden">
+                    <AnimatePresence>
+                      {players.length > 0 && humanPlayer && humanPlayer.hand.map((card) => (
+                        <div key={card.id} className="flex justify-center">
+                          <CardView
+                            card={card}
+                            size="sm"
+                            onClick={() => handleAction('PLAY', card)}
+                            disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
+                          />
+                        </div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                  <div className="hidden md:flex justify-center items-center gap-1 overflow-x-hidden">
+                    <AnimatePresence>
+                      {players.length > 0 && humanPlayer && humanPlayer.hand.map((card) => (
+                        <CardView
+                          key={card.id}
+                          card={card}
+                          size={humanPlayer.hand.length > 8 ? "xs" : humanPlayer.hand.length > 5 ? "sm" : "md"}
+                          onClick={() => handleAction('PLAY', card)}
+                          disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  </div>
                   {players.length > 0 && humanPlayer && humanPlayer.hand.length === 0 && phase !== 'VOTING' && (
-                    <div className="flex items-center gap-2 opacity-20 italic text-xs">
+                    <div className="flex items-center justify-center gap-2 opacity-20 italic text-xs py-1">
                       <AlertCircle size={14} /> No cards
                     </div>
                   )}
                 </div>
 
-                {/* Actions */}
-                <div className="flex justify-center gap-2 mt-2">
+                {/* Actions — stacked full-width on mobile, side by side on desktop */}
+                <div className="flex flex-col md:flex-row justify-center gap-2 mt-2">
                   <button
                     disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
                     onClick={() => handleAction('DRAW')}
-                    className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
+                    className="w-full md:flex-1 md:max-w-[100px] py-2 md:py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
                   >
                     Draw
                   </button>
                   <button
                     disabled={phase !== 'ACTION' || currentPlayer?.isAI || currentPlayerIndex !== humanPlayerIdx}
                     onClick={() => handleAction('PASS')}
-                    className="flex-1 max-w-[100px] py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
+                    className="w-full md:flex-1 md:max-w-[100px] py-2 md:py-1.5 border border-[#141414] text-[10px] font-black uppercase hover:bg-[#141414] hover:text-[#E4E3E0] disabled:opacity-30 transition-all rounded shadow-[2px_2px_0px_0px_#141414] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none bg-white"
                   >
                     Pass
                   </button>
@@ -1240,7 +1257,7 @@ export default function App() {
                               Team {teamIdx + 1}
                             </span>
                           </div>
-                          <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
+                          <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : score < 0 ? 'text-red-600' : 'text-[#141414]'}`}>
                             {score}
                           </span>
                         </div>
@@ -1249,8 +1266,8 @@ export default function App() {
                           {teamPlayers.map(p => (
                             <div
                               key={p.id}
-                              className={`flex justify-between items-center px-2 py-0.5 ${sbConfig.statSz} transition-colors
-                                ${currentPlayerIndex === p.id ? 'bg-blue-500 text-white' : 'opacity-60'}`}
+                              className={`flex justify-between items-center px-2 py-1 ${sbConfig.statSz} transition-colors
+                                ${currentPlayerIndex === p.id ? 'bg-blue-500 text-white' : ''}`}
                             >
                               <div className="flex items-center gap-0.5">
                                 {p.isAI ? <Cpu size={7} /> : <User size={7} />}
@@ -1258,13 +1275,13 @@ export default function App() {
                                 {p.hasActed && (
                                   <span className="flex items-center gap-0.5">
                                     <span className={`font-black text-[11px] ${currentPlayerIndex === p.id ? 'text-white' : 'text-green-500'}`}>✓</span>
-                                    {lastAction[p.id] && <span className={`font-bold text-[10px] ${lastAction[p.id].red ? 'text-red-400' : (currentPlayerIndex === p.id ? 'text-white/70' : 'text-zinc-400')}`}>{lastAction[p.id].label}</span>}
+                                    {lastAction[p.id] && <span className={`font-bold text-[10px] ${lastAction[p.id].red ? 'text-red-500' : (currentPlayerIndex === p.id ? 'text-white/70' : 'text-[#141414]')}`}>{lastAction[p.id].label}</span>}
                                   </span>
                                 )}
                               </div>
-                              <div className="flex gap-1.5 font-mono">
-                                <span>H:{p.hand.length}</span>
-                                <span>C:{p.captured.length}</span>
+                              <div className="flex gap-2 font-mono font-bold">
+                                <span className={currentPlayerIndex === p.id ? 'text-white' : 'text-[#141414]'}>✋{p.hand.length}</span>
+                                <span className={currentPlayerIndex === p.id ? 'text-white/70' : 'text-zinc-500'}>+{p.captured.length}</span>
                               </div>
                             </div>
                           ))}
@@ -1286,7 +1303,6 @@ export default function App() {
                         className={`${sbConfig.pad} border rounded-lg flex justify-between items-center transition-all duration-300
                           ${isCurrent ? 'border-l-4 border-l-blue-500 bg-blue-50/50' : 'bg-white border-[#141414]/10'}
                           ${isLeader ? 'border-l-4 border-l-amber-500 ring-1 ring-amber-400' : ''}
-                          ${p.hasActed && !isCurrent ? 'opacity-50' : ''}
                         `}
                       >
                         <div className="flex flex-col min-w-0">
@@ -1297,16 +1313,16 @@ export default function App() {
                             {p.hasActed && (
                               <span className="shrink-0 flex items-center gap-0.5">
                                 <span className="text-green-500 font-black text-[11px]">✓</span>
-                                {lastAction[p.id] && <span className={`font-bold ${sbConfig.statSz} ${lastAction[p.id].red ? 'text-red-400' : 'text-zinc-400'}`}>{lastAction[p.id].label}</span>}
+                                {lastAction[p.id] && <span className={`font-bold ${sbConfig.statSz} ${lastAction[p.id].red ? 'text-red-500' : 'text-[#141414]'}`}>{lastAction[p.id].label}</span>}
                               </span>
                             )}
                           </div>
-                          <div className={`flex gap-1.5 mt-0.5 font-bold text-zinc-400 ${sbConfig.statSz}`}>
-                            <span>H:{p.hand.length}</span>
-                            <span>C:{p.captured.length}</span>
+                          <div className={`flex gap-2 mt-0.5 font-mono font-bold ${sbConfig.statSz}`}>
+                            <span className="text-[#141414]">✋{p.hand.length}</span>
+                            <span className="text-zinc-500">+{p.captured.length}</span>
                           </div>
                         </div>
-                        <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : 'text-[#141414]'}`}>
+                        <span className={`font-mono font-black shrink-0 ml-1 ${sbConfig.scoreSz} ${isLeader ? 'text-amber-600' : score < 0 ? 'text-red-600' : 'text-[#141414]'}`}>
                           {score}
                         </span>
                       </div>
@@ -1370,53 +1386,190 @@ export default function App() {
       {/* Overlays */}
       <AnimatePresence>
         {phase === 'VOTING' && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-[#141414]/80 backdrop-blur-md z-[60] flex items-center justify-center p-4"
+            className="fixed inset-0 bg-[#141414]/85 backdrop-blur-md z-[60] flex items-center justify-center p-4"
           >
-            <div className="max-w-md w-full border-4 border-[#141414] bg-[#E4E3E0] p-8 text-center shadow-[10px_10px_0px_0px_#141414] rounded-3xl">
-              <Layers size={48} className="mx-auto mb-4 text-[#141414]" />
-              <h2 className="text-2xl font-serif italic font-black mb-2 uppercase tracking-tighter">Player Out of Cards</h2>
-              <p className="text-sm mb-8 font-bold">A player has run out of cards. Keep playing (they'll pass each turn) or end the round now?</p>
-
-              {isSpectator ? (
-                <div className="text-sm font-bold opacity-40 italic py-4">CPU players are voting…</div>
-              ) : (
-                <div className="grid grid-cols-2 gap-4">
-                  <button
-                    disabled={votes[humanPlayerIdx] !== undefined}
-                    onClick={() => handleVote(humanPlayerIdx, 'KEEP')}
-                    className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
-                      ${votes[humanPlayerIdx] === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-amber-50'}`}
-                  >
-                    Continue
-                  </button>
-                  <button
-                    disabled={votes[humanPlayerIdx] !== undefined}
-                    onClick={() => handleVote(humanPlayerIdx, 'END')}
-                    className={`py-4 rounded-xl border-2 border-[#141414] font-black uppercase text-sm shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all
-                      ${votes[humanPlayerIdx] === 'END' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-red-50'}`}
-                  >
-                    End Round
-                  </button>
-                </div>
-              )}
-
-              <div className="mt-8 space-y-2">
-                <p className="text-[10px] uppercase font-black opacity-40 mb-2">Voting Status</p>
-                <div className="flex flex-wrap justify-center gap-2">
-                  {players.map(p => (
-                    <div key={p.id} className={`px-3 py-1 rounded-full border border-[#141414] text-[9px] font-bold flex items-center gap-1.5
-                      ${votes[p.id] ? 'bg-green-500 text-white border-green-600' : 'bg-white/50 opacity-50'}`}>
-                      {p.isAI ? <Cpu size={10} /> : <User size={10} />}
-                      {p.name}: {votes[p.id] ? 'VOTED' : '...'}
-                    </div>
-                  ))}
+            <motion.div
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05, duration: 0.25 }}
+              className="w-full max-w-4xl border-2 border-[#141414] bg-[#E4E3E0] shadow-[10px_10px_0px_0px_#141414] flex flex-col overflow-hidden max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="bg-[#141414] text-[#E4E3E0] px-5 py-3 flex items-center gap-3 shrink-0">
+                <Layers size={18} className="text-amber-400 shrink-0" />
+                <div>
+                  <h2 className="text-base font-serif italic font-black uppercase tracking-tighter leading-none">Player Out of Cards</h2>
+                  <p className="text-[10px] opacity-50 uppercase tracking-widest mt-0.5">Vote to continue or end the round</p>
                 </div>
               </div>
-            </div>
+
+              {/* Body — two columns */}
+              <div className="flex flex-col md:flex-row flex-1 overflow-hidden min-h-0">
+
+                {/* LEFT: Info panel */}
+                <div className="flex-1 flex flex-col overflow-hidden border-b md:border-b-0 md:border-r border-[#141414]/20">
+
+                  {/* Stakes row */}
+                  <div className="flex gap-0 border-b border-[#141414]/15 shrink-0">
+                    <div className="flex-1 px-4 py-3 border-r border-[#141414]/15">
+                      <p className="text-[9px] uppercase font-black opacity-40 tracking-widest mb-0.5">Cards at Stake</p>
+                      <p className="font-mono font-black text-2xl">{pile.length + side.length}</p>
+                      <p className="text-[9px] opacity-40 mt-0.5">pile + side</p>
+                    </div>
+                    <div className="flex-1 px-4 py-3">
+                      <p className="text-[9px] uppercase font-black opacity-40 tracking-widest mb-0.5">Stack Remaining</p>
+                      <p className="font-mono font-black text-2xl">{deck.length}</p>
+                      <p className="text-[9px] opacity-40 mt-0.5">cards left to flip</p>
+                    </div>
+                  </div>
+
+                  {/* Player hand sizes + scores */}
+                  <div className="border-b border-[#141414]/15 shrink-0 px-4 py-3">
+                    <p className="text-[9px] uppercase font-black opacity-40 tracking-widest mb-2">Players</p>
+                    <div className="space-y-1">
+                      {numTeams > 1
+                        ? new Array(numTeams).fill(0).map((_, teamIdx) => {
+                            const teamPlayers = players.filter((_, i) => getTeamIndex(i, players.length, numTeams) === teamIdx);
+                            const tc = TEAM_COLOR_CLASSES[teamIdx % TEAM_COLOR_CLASSES.length];
+                            return (
+                              <div key={teamIdx} className={`border-l-2 ${tc.border} pl-2`}>
+                                <p className={`text-[9px] font-black uppercase ${tc.text} mb-0.5`}>Team {teamIdx + 1} — {liveScores[teamIdx] ?? 0} pts</p>
+                                {teamPlayers.map(p => (
+                                  <div key={p.id} className="flex items-center justify-between text-xs font-mono py-0.5">
+                                    <span className="flex items-center gap-1 opacity-70">
+                                      {p.isAI ? <Cpu size={9} /> : <User size={9} />}
+                                      <span className="font-bold uppercase text-[10px]">{p.name}</span>
+                                      {p.hand.length === 0 && <span className="text-amber-600 font-black text-[9px]">OUT</span>}
+                                    </span>
+                                    <span className="font-black">{p.hand.length} cards</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })
+                        : players.map((p, i) => (
+                            <div key={p.id} className="flex items-center justify-between">
+                              <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase">
+                                {p.isAI ? <Cpu size={9} /> : <User size={9} />}
+                                {p.name}
+                                {p.hand.length === 0 && <span className="text-amber-600 font-black text-[9px] ml-1">OUT</span>}
+                              </span>
+                              <div className="flex items-center gap-3 font-mono text-[11px]">
+                                <span className="opacity-50">{p.hand.length} cards</span>
+                                <span className="font-black w-10 text-right">{liveScores[i] ?? 0} pts</span>
+                              </div>
+                            </div>
+                          ))
+                      }
+                    </div>
+                  </div>
+
+                  {/* CPU vote status */}
+                  <div className="border-b border-[#141414]/15 shrink-0 px-4 py-3">
+                    <p className="text-[9px] uppercase font-black opacity-40 tracking-widest mb-2">Votes Cast</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {players.map(p => {
+                        const v = votes[p.id];
+                        return (
+                          <div key={p.id} className={`flex items-center gap-1.5 px-2 py-1 border text-[9px] font-bold rounded
+                            ${v === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0] border-[#141414]'
+                            : v === 'END'  ? 'bg-red-600 text-white border-red-700'
+                            : 'bg-white border-[#141414]/30 opacity-40'}`}>
+                            {p.isAI ? <Cpu size={8} /> : <User size={8} />}
+                            <span className="uppercase">{p.name}</span>
+                            <span className="opacity-70">
+                              {v === 'KEEP' ? '→ CONTINUE' : v === 'END' ? '→ END' : '…'}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Game log */}
+                  <div className="flex-1 overflow-hidden flex flex-col min-h-0 px-4 py-3">
+                    <p className="text-[9px] uppercase font-black opacity-40 tracking-widest mb-2 shrink-0">Recent Log</p>
+                    <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-1 custom-scrollbar">
+                      {logs.slice(0, 15).map(log => (
+                        <div key={log.id} className={`leading-tight
+                          ${log.type === 'PLAYER' ? 'text-blue-600 font-bold' :
+                            log.type === 'CPU'    ? 'text-red-600 italic' :
+                            'text-zinc-500'}
+                          ${log.text.startsWith('---') ? 'text-amber-700 font-black' : ''}`}>
+                          {log.text}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* RIGHT: Explanation + buttons */}
+                <div className="w-full md:w-72 shrink-0 flex flex-col p-5 gap-4 bg-white/40">
+
+                  {/* Option explanations */}
+                  <div className="space-y-3">
+                    <div className="border border-[#141414]/20 rounded p-3 bg-white">
+                      <p className="text-[9px] uppercase font-black tracking-widest mb-1 text-red-600">End Round</p>
+                      <p className="text-[11px] leading-snug opacity-70">
+                        Score now. Each player earns <span className="font-bold text-[#141414]">captured − cards in hand</span>.
+                        Player with most points wins the round.
+                      </p>
+                    </div>
+                    <div className="border border-[#141414]/20 rounded p-3 bg-white">
+                      <p className="text-[9px] uppercase font-black tracking-widest mb-1 text-green-700">Continue Playing</p>
+                      <p className="text-[11px] leading-snug opacity-70">
+                        Keep going. The player with no cards will <span className="font-bold text-[#141414]">draw or pass</span> each turn.
+                        More cards can be captured before scoring.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Buttons / spectator notice */}
+                  <div className="mt-auto space-y-2">
+                    {isSpectator ? (
+                      <div className="border border-[#141414]/20 rounded p-3 bg-white text-center">
+                        <p className="text-[10px] uppercase font-black opacity-40 tracking-widest">CPU players deciding…</p>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-[9px] uppercase font-black opacity-40 tracking-widest">Your Vote</p>
+                        <button
+                          disabled={votes[humanPlayerIdx] !== undefined}
+                          onClick={() => handleVote(humanPlayerIdx, 'END')}
+                          className={`w-full py-3.5 border-2 border-[#141414] font-black uppercase text-sm tracking-widest
+                            shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none
+                            transition-all rounded
+                            ${votes[humanPlayerIdx] === 'END' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-red-50'}`}
+                        >
+                          End Round
+                          <span className="block text-[8px] font-bold opacity-50 normal-case tracking-normal mt-0.5">Score what's captured now</span>
+                        </button>
+                        <button
+                          disabled={votes[humanPlayerIdx] !== undefined}
+                          onClick={() => handleVote(humanPlayerIdx, 'KEEP')}
+                          className={`w-full py-3.5 border-2 border-[#141414] font-black uppercase text-sm tracking-widest
+                            shadow-[4px_4px_0px_0px_#141414] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none
+                            transition-all rounded
+                            ${votes[humanPlayerIdx] === 'KEEP' ? 'bg-[#141414] text-[#E4E3E0]' : 'bg-white hover:bg-amber-50'}`}
+                        >
+                          Continue
+                          <span className="block text-[8px] font-bold opacity-50 normal-case tracking-normal mt-0.5">Keep playing for more cards</span>
+                        </button>
+                        {votes[humanPlayerIdx] !== undefined && (
+                          <p className="text-[9px] text-center opacity-40 font-bold uppercase tracking-widest">
+                            Voted — waiting for others…
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
           </motion.div>
         )}
         {!gameStarted && (() => {
