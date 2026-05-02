@@ -25,7 +25,9 @@
       "Bash(python training/evaluate_population.py --dir checkpoints --quick --games 3)",
       "Bash(python training/eval_tournament.py --dir checkpoints --games-1v1 3 --games-2v2 3 --games-8p 5 --top-n 4 --quiet)",
       "Bash(python -c ':*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\etmue\\\\Desktop\\\\Github\\\\defererence\")",
+      "Bash(Select-Object Name, Mode)"
     ],
     "additionalDirectories": [
       "c:\\Users\\etmue\\Desktop\\Github\\defererence\\src"

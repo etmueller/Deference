@@ -135,7 +135,7 @@ const getTeamIndex = (playerIdx: number, totalPlayers: number, totalTeams: numbe
   return Math.floor(playerIdx / teamSize);
 };
 
-// Target score based on competing units (teams in team mode, players in FFA).
+// Normalisation reference used only for AI inference input features.
 const calcTargetScore = (numPlayers: number, numTeams: number): number => {
   const units = numTeams > 1 ? numTeams : numPlayers;
   return Math.ceil(100 / units) + 2;
@@ -183,6 +183,28 @@ const TEAM_MODES: Record<number, TeamMode[]> = {
     { label: '2v2v2v2',      numTeams: 4 },
   ],
 };
+
+const ALL_NEGATIVE_QUOTES = [
+  "Nobody won that round. Nobody.",
+  "The cards giveth. The cards taketh away. Mostly taketh.",
+  "A round where everyone lost. Impressive, in a way.",
+  "The pile was never worth fighting over. You fought anyway.",
+  "Collective punishment. The game has spoken.",
+  "Even the winner of that round lost that round.",
+  " Get on in there with your shovel, sexton.",
+  "Nobody left that round with more than they came in with.",
+  "That round was a lesson in the futility of ambition.",
+  "The house always wins. In this case, the house is the discard pile.",
+  "A perfectly distributed disaster.",
+  "When everyone loses, is anyone really losing?",
+  "The cards conspired against all of you equally.",
+  "Zero sum. Emphasis on zero.",
+  "Well. That happened.",
+  "We are the anti-Goats!",
+  "Are you trying to lose?",
+  "That round was brought to you by mutual destruction.",
+  "As the nodes change, so must the edges, otherwise the map will lose its grip on the territory.",
+];
 
 // --- Setup constants ---
 
@@ -294,13 +316,13 @@ export default function App() {
   // --- AI model loading (runs once on mount) ---
   useEffect(() => {
     loadAllPlayers({
-      Lucy:  '/Deference/models/Lucy_2800_inline.onnx',
-      Zane:  '/Deference/models/Zane_950_inline.onnx',
-      Uncle: '/Deference/models/Uncle_950_inline.onnx',
-      Barney:'/Deference/models/Barney_2350_inline.onnx',
-      Fabi:  '/Deference/models/Fabi_3250_inline.onnx',
-      Jane:  '/Deference/models/Jane_3850_inline.onnx',
-      Noema: '/Deference/models/Noema_3850_inline.onnx',
+      Lucy:  '/Deference/models/Lucy_1650.onnx',
+      Zane:  '/Deference/models/Zane_950.onnx',
+      Uncle: '/Deference/models/Uncle_2150.onnx',
+      Barney:'/Deference/models/Barney_800.onnx',
+      Fabi:  '/Deference/models/Fabi_1925.onnx',
+      Jane:  '/Deference/models/Jane_2350.onnx',
+      Noema: '/Deference/models/Noema_2350.onnx',
     }).catch(err => console.error('[AI] Model load error:', err))
   }, [])
 
@@ -324,7 +346,10 @@ export default function App() {
   const [turnLeaderIndex, setTurnLeaderIndex] = useState(0);
   const [playerCount, setPlayerCount] = useState(3);
   const [numTeams, setNumTeams] = useState(1); // 1 = Free for All; >1 = team count
-  const [targetScore, setTargetScore] = useState(36);
+  const [numRounds, setNumRounds] = useState(3);
+  const roundsPlayedRef = useRef(0);
+  const [gameSpeed, setGameSpeed] = useState<'pause' | 'slow' | 'normal' | 'fast'>('normal');
+  const [jokerBanner, setJokerBanner] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [votes, setVotes] = useState<{ [playerId: number]: 'KEEP' | 'END' }>({});
@@ -414,13 +439,14 @@ export default function App() {
     setPlayers(newPlayers);
     setVotes({});
 
-    // Only reset scores if it's the very first round
+    // Only reset scores and round counter if it's the very first round
     if (!gameStarted) {
       if (numTeams > 1) {
         setGameScores(new Array(numTeams).fill(0));
       } else {
         setGameScores(new Array(count).fill(0));
       }
+      roundsPlayedRef.current = 0;
     }
 
     const nextLeader = gameStarted ? (roundLeaderIndex + 1) % count : 0;
@@ -468,7 +494,10 @@ export default function App() {
     setLastAction({});
     
     if (flipped.isJoker) {
-      // Joker flipped from Stack: flipper immediately wins all cards in Pile and Side
+      // Joker flipped from Stack: slow down + show banner, then flipper wins all cards
+      setGameSpeed('slow');
+      setJokerBanner(true);
+      setTimeout(() => setJokerBanner(false), 1500);
       const allCards = [...pile, ...side, flipped];
       addLog(`${currentPlayer?.name} flipped a JOKER from the Stack — wins all ${allCards.length} card${allCards.length !== 1 ? 's' : ''} instantly!`, currentPlayer?.isAI ? 'CPU' : 'PLAYER');
       showMessage(`${currentPlayer?.name} flipped a Joker — wins the pile instantly!`, 'success');
@@ -556,6 +585,7 @@ export default function App() {
 
   const calculateRoundScores = useCallback((currentPlayers: Player[], currentGameScores: number[]) => {
     const roundScores = currentPlayers.map(p => p.captured.length - p.hand.length);
+    const allNegativeOrZero = roundScores.every(d => d <= 0);
     let newGameScores: number[] = [];
 
     if (numTeams > 1) {
@@ -572,46 +602,61 @@ export default function App() {
         addLog(`Team ${i + 1}: ${teamRound} pts (Total: ${score})`);
       });
 
-      // WIN_ROUND quote for team mode
-      const teamRoundDeltas = newGameScores.map((s, i) => s - currentGameScores[i]);
-      const maxTeamRound = Math.max(...teamRoundDeltas);
-      const winningTeams = teamRoundDeltas.reduce((acc, d, i) => d === maxTeamRound ? [...acc, i] : acc, [] as number[]);
-      if (winningTeams.length === 1) {
-        const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winningTeams[0]);
-        const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
-        if (speaker) {
-          const q = getQuote(speaker.name, 'WIN_ROUND');
-          addLog(`${speaker.name}: "${q}"`);
-          setRoundWinQuote({ name: speaker.name, quote: q });
-        }
-      } else {
-        const q = getTieQuote();
-        addLog(`"${q}"`);
+      if (allNegativeOrZero) {
+        const q = ALL_NEGATIVE_QUOTES[Math.floor(Math.random() * ALL_NEGATIVE_QUOTES.length)];
+        addLog(`"${q}"`, 'SYSTEM');
         setRoundWinQuote({ name: '', quote: q });
+      } else {
+        // WIN_ROUND quote for team mode
+        const teamRoundDeltas = newGameScores.map((s, i) => s - currentGameScores[i]);
+        const maxTeamRound = Math.max(...teamRoundDeltas);
+        const winningTeams = teamRoundDeltas.reduce((acc, d, i) => d === maxTeamRound ? [...acc, i] : acc, [] as number[]);
+        if (winningTeams.length === 1) {
+          const teamMembers = currentPlayers.filter((_, i) => getTeamIndex(i, currentPlayers.length, numTeams) === winningTeams[0]);
+          const speaker = teamMembers[Math.floor(Math.random() * teamMembers.length)];
+          if (speaker) {
+            const q = getQuote(speaker.name, 'WIN_ROUND');
+            addLog(`${speaker.name}: "${q}"`);
+            setRoundWinQuote({ name: speaker.name, quote: q });
+          }
+        } else {
+          const q = getTieQuote();
+          addLog(`"${q}"`);
+          setRoundWinQuote({ name: '', quote: q });
+        }
       }
     } else {
       newGameScores = currentGameScores.map((s, i) => s + (roundScores[i] || 0));
       addLog("--- ROUND OVER ---");
       currentPlayers.forEach((p, i) => addLog(`${p.name}: ${roundScores[i]} pts (Total: ${newGameScores[i]})`));
 
-      // WIN_ROUND quote for FFA mode
-      const maxRound = Math.max(...roundScores);
-      const roundWinners = roundScores.reduce((acc, s, i) => s === maxRound ? [...acc, i] : acc, [] as number[]);
-      if (roundWinners.length === 1) {
-        const rw = currentPlayers[roundWinners[0]];
-        const q = getQuote(rw.name, 'WIN_ROUND');
-        addLog(`${rw.name}: "${q}"`);
-        setRoundWinQuote({ name: rw.name, quote: q });
-      } else {
-        const q = getTieQuote();
-        addLog(`"${q}"`);
+      if (allNegativeOrZero) {
+        const q = ALL_NEGATIVE_QUOTES[Math.floor(Math.random() * ALL_NEGATIVE_QUOTES.length)];
+        addLog(`"${q}"`, 'SYSTEM');
         setRoundWinQuote({ name: '', quote: q });
+      } else {
+        // WIN_ROUND quote for FFA mode
+        const maxRound = Math.max(...roundScores);
+        const roundWinners = roundScores.reduce((acc, s, i) => s === maxRound ? [...acc, i] : acc, [] as number[]);
+        if (roundWinners.length === 1) {
+          const rw = currentPlayers[roundWinners[0]];
+          const q = getQuote(rw.name, 'WIN_ROUND');
+          addLog(`${rw.name}: "${q}"`);
+          setRoundWinQuote({ name: rw.name, quote: q });
+        } else {
+          const q = getTieQuote();
+          addLog(`"${q}"`);
+          setRoundWinQuote({ name: '', quote: q });
+        }
       }
     }
 
     setGameScores(newGameScores);
 
-    if (newGameScores.some(s => s >= targetScore)) {
+    const newRoundsPlayed = roundsPlayedRef.current + 1;
+    roundsPlayedRef.current = newRoundsPlayed;
+
+    if (newRoundsPlayed >= numRounds) {
       setPhase('GAME_OVER');
       const maxScore = Math.max(...newGameScores);
       const winnerIndices = newGameScores.reduce((acc: number[], s, i) => s === maxScore ? [...acc, i] : acc, []);
@@ -637,7 +682,7 @@ export default function App() {
       return true; // Game is over
     }
     return false; // Game continues
-  }, [numTeams, targetScore, addLog]);
+  }, [numTeams, numRounds, addLog]);
 
   const handleAction = (action: 'PLAY' | 'DRAW' | 'PASS', card?: Card) => {
     if (phase !== 'ACTION') return;
@@ -913,6 +958,7 @@ export default function App() {
     setSetupStep(1);
     setSetupSeats([]);
     chosenPlayersRef.current = [];
+    setGameSpeed('normal');
   }, []);
 
   // CPU voting effect — module-level Set guards against re-render duplicates.
@@ -932,7 +978,7 @@ export default function App() {
           players, pile, side, deck, leadSuit, deferred,
           currentPlayerIndex: p.id,
           turnOrder, turnLeaderIndex, lastChallengerId,
-          turnActionCount, gameScores, targetScore, numTeams, phase, votes,
+          turnActionCount, gameScores, targetScore: calcTargetScore(playerCount, numTeams), numTeams, phase, votes,
         }
 
         let choice: 'KEEP' | 'END';
@@ -1000,12 +1046,16 @@ export default function App() {
   // AI game-action effect (START / ACTION phases).
   useEffect(() => {
     if (phase === 'VOTING') return; // handled by the effect above
+    if (gameSpeed === 'pause') return; // paused — wait for user to resume
+
+    const startDelay  = gameSpeed === 'slow' ? 2000 : gameSpeed === 'fast' ? 200 : 1000;
+    const actionDelay = gameSpeed === 'slow' ? 2000 : gameSpeed === 'fast' ? 200 : 1500;
 
     if (currentPlayer?.isAI) {
       if (phase === 'START') {
         const timer = setTimeout(() => {
           startTurn();
-        }, 1000);
+        }, startDelay);
         return () => clearTimeout(timer);
       }
 
@@ -1027,7 +1077,7 @@ export default function App() {
             lastChallengerId,
             turnActionCount,
             gameScores,
-            targetScore,
+            targetScore: calcTargetScore(playerCount, numTeams),
             numTeams,
             phase,
             votes,
@@ -1046,11 +1096,11 @@ export default function App() {
             console.error(`[AI] ${currentPlayer.name} inference failed, falling back to PASS:`, err)
             handleAction('PASS')
           }
-        }, 1500)
+        }, actionDelay)
         return () => clearTimeout(timer)
       }
     }
-  }, [phase, currentPlayerIndex, leadSuit, pile, deck.length, startTurn, currentPlayer?.isAI]);
+  }, [phase, currentPlayerIndex, leadSuit, pile, deck.length, startTurn, currentPlayer?.isAI, gameSpeed]);
 
   // --- Render Helpers ---
 
@@ -1079,12 +1129,27 @@ export default function App() {
           <h1 className="text-xl font-bold tracking-tighter uppercase italic font-serif">DEFERENCE</h1>
           <p className="text-[10px] uppercase tracking-widest opacity-60 font-bold">Diamonds are for the clever.</p>
         </div>
-        <div className="flex gap-4 items-center">
+        <div className="flex gap-3 items-center">
+          {gameStarted && (
+            <div className="flex items-center gap-1">
+              {(['pause', 'slow', 'normal', 'fast'] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setGameSpeed(s)}
+                  title={s === 'pause' ? 'Pause' : s === 'slow' ? 'Slow (2s)' : s === 'normal' ? 'Normal' : 'Fast (0.2s)'}
+                  className={`w-7 h-7 flex items-center justify-center text-[13px] border border-[#141414] transition-colors
+                    ${gameSpeed === s ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
+                >
+                  {s === 'pause' ? '⏸' : s === 'slow' ? '🐢' : s === 'normal' ? '▶' : '⚡'}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="text-right flex items-center gap-2">
-            <p className="text-[10px] uppercase opacity-60 font-bold">Target</p>
-            <p className="font-mono font-bold text-lg">{targetScore}</p>
+            <p className="text-[10px] uppercase opacity-60 font-bold">Round</p>
+            <p className="font-mono font-bold text-lg">{roundsPlayedRef.current + 1}/{numRounds}</p>
           </div>
-          <button 
+          <button
             onClick={resetGame}
             className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-colors border border-[#141414] rounded"
           >
@@ -1436,6 +1501,24 @@ export default function App() {
 
       {/* Overlays */}
       <AnimatePresence>
+        {jokerBanner && (
+          <motion.div
+            key="joker-banner"
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.04 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center pointer-events-none"
+          >
+            <div className="bg-[#141414] text-[#E4E3E0] px-14 py-10 text-center border-2 border-amber-400 shadow-[8px_8px_0px_0px_rgba(251,191,36,0.4)]">
+              <p className="text-6xl mb-4">🃏</p>
+              <p className="text-2xl font-serif italic font-bold text-amber-400 tracking-wide">A Joker appears...</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {phase === 'VOTING' && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -1747,7 +1830,7 @@ export default function App() {
                           {[2, 3, 4, 5, 6, 7, 8].map(n => (
                             <button
                               key={n}
-                              onClick={() => { setPlayerCount(n); setNumTeams(1); setTargetScore(calcTargetScore(n, 1)); }}
+                              onClick={() => { setPlayerCount(n); setNumTeams(1); }}
                               className={`flex-1 py-2 border border-[#141414] text-xs font-mono font-bold
                                 ${playerCount === n ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
                             >{n}</button>
@@ -1763,7 +1846,7 @@ export default function App() {
                             {TEAM_MODES[playerCount].map(mode => (
                               <button
                                 key={mode.numTeams}
-                                onClick={() => { setNumTeams(mode.numTeams); setTargetScore(calcTargetScore(playerCount, mode.numTeams)); }}
+                                onClick={() => { setNumTeams(mode.numTeams); }}
                                 className={`flex-1 py-2 border border-[#141414] text-xs font-mono font-bold
                                   ${numTeams === mode.numTeams ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-zinc-100'}`}
                               >{mode.label}</button>
@@ -1772,17 +1855,19 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* Target score */}
+                      {/* Number of rounds */}
                       <div>
-                        <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">
-                          Target Score
-                          <span className="ml-2 normal-case opacity-70">⌈100 ÷ {numTeams > 1 ? numTeams : playerCount}⌉ + 2</span>
-                        </label>
+                        <label className="text-[10px] uppercase font-bold opacity-50 block mb-2">Number of Rounds</label>
                         <div className="flex items-center gap-4">
-                          <input type="range" min="10" max="100" step="1" value={targetScore}
-                            onChange={e => setTargetScore(parseInt(e.target.value))}
-                            className="flex-1 accent-[#141414]" />
-                          <span className="font-mono font-bold text-xl w-12 text-center">{targetScore}</span>
+                          <button
+                            onClick={() => setNumRounds((r: number) => Math.max(1, r - 1))}
+                            className="w-10 h-10 border border-[#141414] text-lg font-bold hover:bg-zinc-100 transition-colors"
+                          >−</button>
+                          <span className="font-mono font-bold text-xl flex-1 text-center">{numRounds}</span>
+                          <button
+                            onClick={() => setNumRounds((r: number) => Math.min(10, r + 1))}
+                            className="w-10 h-10 border border-[#141414] text-lg font-bold hover:bg-zinc-100 transition-colors"
+                          >+</button>
                         </div>
                       </div>
                     </div>
@@ -1810,7 +1895,7 @@ export default function App() {
                               {[
                                 {
                                   heading: 'Objective',
-                                  body: 'Reach the target score before your opponents.\nScore = cards captured − cards left in hand at round end.',
+                                  body: 'Have the most points after all rounds are played.\nScore = cards captured − cards left in hand at round end.',
                                 },
                                 {
                                   heading: 'Each Turn',
@@ -2007,7 +2092,10 @@ export default function App() {
             <div className="w-full max-w-3xl flex gap-6 h-[80vh]">
               {/* Left — Scores + quote */}
               <div className="w-72 shrink-0 border-2 border-[#E4E3E0] bg-[#141414] text-[#E4E3E0] p-8 flex flex-col justify-center">
-                <h2 className="text-3xl font-serif italic font-bold mb-6 uppercase text-center">Round Complete</h2>
+                <h2 className="text-3xl font-serif italic font-bold mb-1 uppercase text-center">Round Complete</h2>
+                <p className="text-[10px] uppercase font-black opacity-40 tracking-widest text-center mb-6">
+                  {roundsPlayedRef.current} of {numRounds} rounds
+                </p>
                 <div className="space-y-3 mb-6">
                   {numTeams > 1 ? (
                     new Array(numTeams).fill(0).map((_, teamIdx) => (
@@ -2101,11 +2189,11 @@ export default function App() {
                     <p className="text-lg font-mono mb-4">
                       {winner !== null
                         ? (numTeams > 1
-                            ? `Team ${winner + 1} has reached the target score!`
+                            ? `Team ${winner + 1} wins after ${numRounds} rounds!`
                             : players[winner].isAI
-                              ? `${players[winner].name} has reached the target score!`
-                              : 'You have reached the target score!')
-                        : 'Game over!'}
+                              ? `${players[winner].name} wins after ${numRounds} rounds!`
+                              : `You win after ${numRounds} rounds!`)
+                        : `Game over after ${numRounds} rounds!`}
                     </p>
                     {winGameQuote && (
                       <p className="text-amber-400 italic font-serif text-lg mb-6 leading-snug">"{winGameQuote}"</p>

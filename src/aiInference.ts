@@ -86,9 +86,9 @@ const ACTION_PASS          = 55
 const ACTION_VOTE_CONTINUE = 56
 const ACTION_VOTE_END      = 57
 const MAX_PLAYERS = 8
-const STATE_DIM   = 392   // base encode_observation output
-const STATE_DIM_V2 = 572  // encode_observation_v2 output
-// obs_input_dim_v2 = STATE_DIM_V2 + ACTION_SIZE = 630
+const STATE_DIM    = 392   // base encode_observation output (unchanged from v2)
+const STATE_DIM_V3 = 478   // base + 86 engineered features (v3)
+// obs_input_dim_v3 = STATE_DIM_V3 + ACTION_SIZE = 536
 
 // ─── Player style IDs ────────────────────────────────────────────────────────
 // Must match STYLE_TO_ID in training code.
@@ -190,8 +190,8 @@ function getSession(playerName: string): ort.InferenceSession {
 
 
 // ─── Observation encoder ─────────────────────────────────────────────────────
-// TypeScript port of diamonds_env_v2.py: encode_observation() + encode_observation_v2()
-// Produces a 572-float vector. Mask (58 floats) is appended → 630 total for the model.
+// TypeScript port of feature_builder_v3.py: base encode_observation (392) + 86 V3 features.
+// Produces a 478-float vector. Mask (58 floats) is appended → 536 total for the model.
 
 function safeDiv(n: number, d: number): number {
   return d === 0 ? 0 : n / d
@@ -260,8 +260,8 @@ function currentWinningCardInt(
 }
 
 /**
- * Encode the full 630-dim input vector for the ONNX model.
- * Equivalent to: encode_observation_v2(obs, state, player_id) + mask_f
+ * Encode the full 536-dim input vector for the V3 ONNX model.
+ * Equivalent to: feature_builder_v3(obs, state, player_id) + mask_f
  */
 function encodeObservation(state: InferenceState, playerId: number): Float32Array {
   const me = playerId
@@ -397,10 +397,14 @@ function encodeObservation(state: InferenceState, playerId: number): Float32Arra
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // V2 EXTENSION (180 dims → total 572)
+  // V3 EXTENSION — 86 engineered features (base 392 → total 478)
+  // Groups: seat_timing(12) control_state(12) tactical_opps(16)
+  //         resources(16) team_context(12) score_context(10) vote_context(8)
   // ─────────────────────────────────────────────────────────────────────────
 
   const suits = [0, 1, 2, 3]  // clubs=0, diamonds=1, hearts=2, spades=3 (env suit idx)
+  const numPlayers = state.players.length
+  const numTeams = state.numTeams ?? 1
 
   function suitOfCard(cid: number): number | null {
     if (cid >= 52) return null
@@ -412,191 +416,195 @@ function encodeObservation(state: InferenceState, playerId: number): Float32Arra
   function highestHeldNaturalRank(suit: number): number {
     let best = 0
     for (const cid of myHandSet) {
-      if (cid < 52 && suitOfCard(cid) === suit) {
-        best = Math.max(best, rankOfCard(cid))
-      }
+      if (cid < 52 && suitOfCard(cid) === suit) best = Math.max(best, rankOfCard(cid))
     }
     return best
   }
   function highestUnknownNaturalRank(suit: number): number {
     let best = 0
     for (const cid of unknownSet) {
-      if (cid < 52 && suitOfCard(cid) === suit) {
-        best = Math.max(best, rankOfCard(cid))
-      }
+      if (cid < 52 && suitOfCard(cid) === suit) best = Math.max(best, rankOfCard(cid))
     }
     return best
   }
-  function highestUnknownEffectiveThreat(suit: number): number {
+
+  // ── Shared intermediates ──────────────────────────────────────────────────
+  const actedCount      = state.players.filter(p => p.hasActed).length
+  const oppOutOfCards   = state.players.filter(p => p.id !== me && p.hand.length === 0).length
+  const hasLeadSuit     = player.hand.some(c => c.suit === state.leadSuit && !c.isJoker)
+  const jokersInHand    = [...myHandSet].filter(c => c >= 52).length
+  const diamondsInHand  = [...myHandSet].filter(c => c < 52 && suitOfCard(c) === 1).length
+  const highestBySuit   = suits.map(s => highestHeldNaturalRank(s))
+  const pileTopCard     = state.pile.length > 0 ? state.pile[state.pile.length - 1] : null
+  const unknownJokers   = [...unknownSet].filter(c => c >= 52).length
+
+  let beatCurrentCount = 0
+  if (currentWinning === null) {
+    beatCurrentCount = legalCardInts.filter(c => c < NUM_CARDS).length
+  } else {
+    beatCurrentCount = legalCardInts.filter(c => c < NUM_CARDS && beats(c, currentWinning, leadSuitEnvIdx ?? -1)).length
+  }
+  const naturalControlInLead = (
+    leadSuitEnvIdx !== null
+    && highestHeldNaturalRank(leadSuitEnvIdx) > 0
+    && highestHeldNaturalRank(leadSuitEnvIdx) > highestUnknownNaturalRank(leadSuitEnvIdx)
+  ) ? 1 : 0
+  let overtakeCount = 0
+  if (currentWinning !== null && currentWinning < 52) {
     for (const cid of unknownSet) {
-      if (cid >= 52) return 15  // joker is a threat
+      if (cid >= 52 || beats(cid, currentWinning, -1)) overtakeCount++
     }
-    return highestUnknownNaturalRank(suit)
   }
 
-  // 1) Exact hand vector (54)
-  const handVec = new Array(NUM_CARDS).fill(0)
-  for (const cid of myHandSet) handVec[cid] = 1
-  vec.push(...handVec)
+  const unactedInTurnOrder = state.turnOrder.filter(pid => !state.players[pid]?.hasActed)
+  const myTurnPos          = state.turnOrder.indexOf(me)
+  const myPosInUnacted     = unactedInTurnOrder.indexOf(me)
+  const unactedAfterMe     = myPosInUnacted >= 0 ? unactedInTurnOrder.length - myPosInUnacted - 1 : 0
+  const amINextToAct       = unactedInTurnOrder.length > 0 && unactedInTurnOrder[0] === me
+  const amILastToAct       = unactedInTurnOrder.length > 0 && unactedInTurnOrder[unactedInTurnOrder.length - 1] === me
 
-  // 2) Unknown-card vector (54)
-  const unknownVec = new Array(NUM_CARDS).fill(0)
-  for (const cid of unknownSet) unknownVec[cid] = 1
-  vec.push(...unknownVec)
+  const oppHandSizes = state.players.filter(p => p.id !== me).map(p => p.hand.length)
+  const avgOppHand   = oppHandSizes.length > 0 ? oppHandSizes.reduce((a, b) => a + b, 0) / oppHandSizes.length : 0
+  const minOppHand   = oppHandSizes.length > 0 ? Math.min(...oppHandSizes) : 0
+  const maxOppHand   = oppHandSizes.length > 0 ? Math.max(...oppHandSizes) : 0
 
-  // 3) Hand summaries (16)
-  vec.push(safeDiv(player.hand.length, 13))
+  const myTeamIdx       = numTeams > 1 ? getTeamIndex(me, numPlayers, numTeams) : me
+  const myScore         = state.gameScores[myTeamIdx] ?? 0
+  const oppScoreKeys    = state.gameScores.map((_, k) => k).filter(k => k !== myTeamIdx)
+  const oppScores       = oppScoreKeys.map(k => state.gameScores[k] ?? 0)
+  const bestOppScore    = oppScores.length > 0 ? Math.max(...oppScores) : 0
+  const avgOppScore     = oppScores.length > 0 ? oppScores.reduce((a, b) => a + b, 0) / oppScores.length : 0
+  const firstPlaceScore = state.gameScores.length > 0 ? Math.max(...state.gameScores) : 0
+  const minScore        = state.gameScores.length > 0 ? Math.min(...state.gameScores) : 0
+  const tgt             = Math.max(1, state.targetScore)
+
+  const endVotes        = Object.values(state.votes).filter(v => v === 'END').length
+  const contVotes       = Object.values(state.votes).filter(v => v === 'KEEP').length
+  const voteCast        = Object.keys(state.votes).length
+  const endingFavorable = myScore >= bestOppScore ? 1 : 0
+  const upside          = safeDiv(state.deck.length, NUM_CARDS) * Math.max(0, safeDiv(avgOppHand - player.hand.length, 13) + 0.5)
+
+  const teammates = numTeams > 1
+    ? state.players.filter((_, i) => i !== me && getTeamIndex(i, numPlayers, numTeams) === myTeamIdx)
+    : []
+  const teammatesActed = teammates.filter(p => p.hasActed).length
+  const myTeamCaptured = numTeams > 1
+    ? state.players.filter((_, i) => getTeamIndex(i, numPlayers, numTeams) === myTeamIdx).reduce((s, p) => s + p.captured.length, 0)
+    : player.captured.length
+  const sideTopIsTeammate = (sideTopPlayer !== null && sideTopPlayer !== me
+    && numTeams > 1 && getTeamIndex(sideTopPlayer, numPlayers, numTeams) === myTeamIdx) ? 1 : 0
+  const canRankMatch = pileTopCard !== null && player.hand.some(c => c.rank === pileTopCard!.rank)
+
+  // ── 1) seat_timing (12) ──────────────────────────────────────────────────
+  vec.push(safeDiv(myTurnPos >= 0 ? myTurnPos : 0, Math.max(1, numPlayers - 1)))
+  vec.push(safeDiv(actedCount, MAX_PLAYERS))
+  vec.push(safeDiv(unactedAfterMe, MAX_PLAYERS - 1))
+  vec.push(state.turnLeaderIndex === me ? 1 : 0)
+  vec.push(state.currentPlayerIndex === me ? 1 : 0)
+  vec.push(amINextToAct ? 1 : 0)
+  vec.push(amILastToAct ? 1 : 0)
+  vec.push(safeDiv(state.turnActionCount, 20))
+  vec.push(safeDiv(state.deck.length, NUM_CARDS))
+  vec.push(safeDiv(oppOutOfCards, MAX_PLAYERS - 1))
+  vec.push(safeDiv(remaining.length, MAX_PLAYERS))
+  vec.push(safeDiv(unactedInTurnOrder.length, MAX_PLAYERS))
+
+  // ── 2) control_state (12) ────────────────────────────────────────────────
+  vec.push(beatCurrentCount > 0 ? 1 : 0)
+  vec.push(safeDiv(beatCurrentCount, 13))
+  vec.push(naturalControlInLead)
+  vec.push(unknownJokers > 0 ? 1 : 0)
+  vec.push(safeDiv(overtakeCount, 15))
+  vec.push(jokersInHand > 0 ? 1 : 0)
+  vec.push(diamondsInHand > 0 ? 1 : 0)
+  vec.push(sideTopPlayer === me ? 1 : 0)
+  vec.push(state.deferred ? 1 : 0)
+  vec.push(state.deferred ? 1 : 0)  // pile_locked: only joker wins when deferred
+  vec.push(currentWinning !== null && currentWinning >= 52 ? 1 : 0)
+  vec.push(pileTop === null ? 1 : 0)
+
+  // ── 3) tactical_opps (16) ────────────────────────────────────────────────
   for (const s of suits) {
     const cnt = [...myHandSet].filter(c => c < 52 && suitOfCard(c) === s).length
     vec.push(safeDiv(cnt, 13))
   }
-  const diamondsInHand = [...myHandSet].filter(c => c < 52 && suitOfCard(c) === 1).length
-  const jokersInHand   = [...myHandSet].filter(c => c >= 52).length
-  vec.push(safeDiv(diamondsInHand, 13))
-  vec.push(safeDiv(jokersInHand, 2))
-  const highestBySuit = suits.map(s => highestHeldNaturalRank(s))
-  for (const h of highestBySuit) vec.push(h / 14)
+  for (const s of suits) vec.push(highestBySuit[s] / 14)
   for (let i = 0; i < suits.length; i++) {
-    const myBest = highestBySuit[i]
-    const unknownBest = highestUnknownNaturalRank(suits[i])
-    vec.push(myBest > 0 && myBest > unknownBest ? 1 : 0)
+    const myBest  = highestBySuit[i]
+    const unkBest = highestUnknownNaturalRank(suits[i])
+    vec.push(myBest > 0 && myBest > unkBest ? 1 : 0)
   }
-  // beat_current_count
-  let beatCurrentCount = 0
-  if (currentWinning === null) {
-    beatCurrentCount = [...legalCardSet].filter(c => c < NUM_CARDS).length
-  } else {
-    beatCurrentCount = [...legalCardSet].filter(c => c < NUM_CARDS && beats(c, currentWinning, leadSuitEnvIdx ?? -1)).length
-  }
-  vec.push(safeDiv(beatCurrentCount, 13))
-
-  // 4) Uncertainty summaries (17)
-  for (const s of suits) {
-    const cnt = [...unknownSet].filter(c => c < 52 && suitOfCard(c) === s).length
-    vec.push(safeDiv(cnt, 13))
-  }
-  for (const s of suits) vec.push(highestUnknownNaturalRank(s) / 14)
-  for (const s of suits) vec.push(highestUnknownEffectiveThreat(s) / 15)
-  const unknownJokers = [...unknownSet].filter(c => c >= 52).length
-  vec.push(safeDiv(unknownJokers, 2))
-  for (let i = 0; i < suits.length; i++) {
-    const myBest = highestBySuit[i]
-    const outrank = [...unknownSet].filter(
-      c => c < 52 && suitOfCard(c) === suits[i] && rankOfCard(c) > myBest
-    ).length
-    vec.push(safeDiv(outrank, 13))
-  }
-
-  // 5) Control / survivability (7)
-  vec.push(beatCurrentCount > 0 ? 1 : 0)
-  vec.push(safeDiv(beatCurrentCount, 13))
-  const myBestLead = leadSuitEnvIdx !== null ? highestHeldNaturalRank(leadSuitEnvIdx) : 0
-  const highestUnknownLead = leadSuitEnvIdx !== null ? highestUnknownNaturalRank(leadSuitEnvIdx) : 0
-  const naturalControlInLead = myBestLead > 0 && myBestLead > highestUnknownLead ? 1 : 0
-  vec.push(naturalControlInLead)
-  vec.push(unknownJokers > 0 ? 1 : 0)
-  // overtake_count: how many unknown cards beat the current winning card
-  let overtakeCount = 0
-  if (currentWinning !== null && currentWinning < 52) {
-    for (const cid of unknownSet) {
-      if (cid >= 52 || (cid < 52 && beats(cid, currentWinning, -1))) overtakeCount++
-    }
-  }
-  vec.push(safeDiv(overtakeCount, 15))
+  vec.push(safeDiv(legalCardInts.length, 13))
+  vec.push(diamondsInHand > 0 && !hasLeadSuit ? 1 : 0)
+  vec.push(canRankMatch ? 1 : 0)
   vec.push(jokersInHand > 0 ? 1 : 0)
-  vec.push(diamondsInHand > 0 ? 1 : 0)
 
-  // 6) Turn geometry (6)
-  let turnPosition = 0, remainingAfter = 0, activeTurnCount = 0
-  activeTurnCount = remaining.length
-  if (state.phase === 'ACTION' && remaining.includes(me)) {
-    const idx = remaining.indexOf(me)
-    const denom = Math.max(1, remaining.length - 1)
-    turnPosition = safeDiv(idx, denom)
-    remainingAfter = remaining.length - idx - 1
-  }
-  const actedCount = state.players.filter(p => p.hasActed).length
-  vec.push(turnPosition)
-  vec.push(safeDiv(remainingAfter, MAX_PLAYERS - 1))
-  vec.push(safeDiv(actedCount, MAX_PLAYERS))
-  vec.push(state.phase === 'ACTION' && remaining.includes(me) && remainingAfter === 0 ? 1 : 0)
-  vec.push(safeDiv(activeTurnCount, MAX_PLAYERS))
-  const oppOutOfCards = state.players.filter(p => p.id !== me && p.hand.length === 0).length
-  vec.push(safeDiv(oppOutOfCards, MAX_PLAYERS - 1))
-
-  // 7) Current contest (8)
-  const pileSize = pileInts.length
-  const sideSize = sideInts.length
-  const contestValue = pileSize + sideSize
-  const currentBestNatural = currentWinning !== null && currentWinning < 52
-    ? rankOfCard(currentWinning) / 14
-    : 0
-  const currentBestIsJoker = currentWinning !== null && currentWinning >= 52 ? 1 : 0
-  const sideTopIsMe = sideTopPlayer === me ? 1 : 0
-  vec.push(safeDiv(sideSize, NUM_CARDS))
-  vec.push(safeDiv(pileSize, NUM_CARDS))
-  vec.push(safeDiv(contestValue, NUM_CARDS))
-  vec.push(currentBestNatural)
-  vec.push(currentBestIsJoker)
-  vec.push(sideTopIsMe)
-  vec.push(state.deferred ? 1 : 0)
-  vec.push(0)  // suit_switched — not tracked
-
-  // 8) Stakes / horizon (8)
-  const oppHandSizes = state.players.filter(p => p.id !== me).map(p => p.hand.length)
-  const avgOppHand = oppHandSizes.length > 0 ? oppHandSizes.reduce((a, b) => a + b, 0) / oppHandSizes.length : 0
-  const minOppHand = oppHandSizes.length > 0 ? Math.min(...oppHandSizes) : 0
-  const maxOppHand = oppHandSizes.length > 0 ? Math.max(...oppHandSizes) : 0
-  vec.push(safeDiv(state.deck.length, NUM_CARDS))
-  vec.push(safeDiv(pileSize, NUM_CARDS))
-  vec.push(safeDiv(sideSize, NUM_CARDS))
+  // ── 4) resources (16) ────────────────────────────────────────────────────
   vec.push(safeDiv(player.hand.length, 13))
+  vec.push(safeDiv(state.deck.length, NUM_CARDS))
+  vec.push(safeDiv(myCaptured, NUM_CARDS))
+  vec.push(safeDiv(oppCaptured, NUM_CARDS))
+  vec.push(safeDiv(unseenDiamonds, 13))
+  vec.push(safeDiv(unseenJokers, 2))
+  vec.push(safeDiv(pileInts.length, NUM_CARDS))
+  vec.push(safeDiv(sideInts.length, NUM_CARDS))
+  vec.push(safeDiv(pileInts.length + sideInts.length, NUM_CARDS))
+  vec.push(safeDiv(unknownSet.size, NUM_CARDS))
   vec.push(safeDiv(avgOppHand, 13))
   vec.push(safeDiv(minOppHand, 13))
   vec.push(safeDiv(maxOppHand, 13))
-  vec.push(safeDiv(state.turnActionCount, 20))
+  vec.push(safeDiv(remaining.length, MAX_PLAYERS))
+  vec.push(safeDiv(actedCount, MAX_PLAYERS))
+  vec.push(safeDiv(oppOutOfCards, MAX_PLAYERS - 1))
 
-  // 9) Score / position (6)
-  const numTeams = state.numTeams ?? 1
-  const myScoreKey = numTeams > 1
-    ? getTeamIndex(me, state.players.length, numTeams)
-    : me
-  const myScore = state.gameScores[myScoreKey] ?? 0
-  const oppScoreKeys = state.gameScores.map((_, k) => k).filter(k => k !== myScoreKey)
-  const oppScores = oppScoreKeys.map(k => state.gameScores[k] ?? 0)
-  const bestOppScore = oppScores.length > 0 ? Math.max(...oppScores) : 0
-  const avgOppScore = oppScores.length > 0 ? oppScores.reduce((a, b) => a + b, 0) / oppScores.length : 0
-  const firstPlaceScore = Math.max(...state.gameScores)
-  const tgt = Math.max(1, state.targetScore)
+  // ── 5) team_context (12) ─────────────────────────────────────────────────
+  vec.push(numTeams > 1 ? 1 : 0)
+  vec.push(safeDiv(numTeams, MAX_PLAYERS))
+  vec.push(safeDiv(myTeamIdx, MAX_PLAYERS))
+  vec.push(safeDiv(teammates.length, MAX_PLAYERS))
+  vec.push(teammates.length > 0 ? safeDiv(teammatesActed, teammates.length) : 0)
+  vec.push(safeDiv(myScore, tgt))
+  vec.push(safeDiv(bestOppScore, tgt))
+  vec.push(safeDiv(avgOppScore, tgt))
+  vec.push(safeDiv(myScore - bestOppScore, tgt))
+  vec.push(safeDiv(myTeamCaptured, NUM_CARDS))
+  vec.push(sideTopIsTeammate)
+  vec.push(teammates.length > 0 && teammatesActed === teammates.length ? 1 : 0)
+
+  // ── 6) score_context (10) ────────────────────────────────────────────────
   vec.push(safeDiv(myScore, tgt))
   vec.push(safeDiv(bestOppScore, tgt))
   vec.push(safeDiv(avgOppScore, tgt))
   vec.push(safeDiv(myScore - firstPlaceScore, tgt))
   vec.push(safeDiv(myScore - bestOppScore, tgt))
+  vec.push(myScore >= firstPlaceScore && firstPlaceScore > minScore ? 1 : 0)
+  vec.push(myScore <= minScore ? 1 : 0)
+  vec.push(safeDiv(firstPlaceScore - minScore, tgt))
+  vec.push(safeDiv(numPlayers, MAX_PLAYERS))
   vec.push(numTeams > 1 ? 1 : 0)
 
-  // 10) Vote context (4)
-  const endVotes   = Object.values(state.votes).filter(v => v === 'END').length
-  const contVotes  = Object.values(state.votes).filter(v => v === 'KEEP').length
-  const endingFavorable = myScore >= bestOppScore ? 1 : 0
-  const upside = safeDiv(state.deck.length, NUM_CARDS) * Math.max(0, safeDiv(avgOppHand - player.hand.length, 13) + 0.5)
+  // ── 7) vote_context (8) ──────────────────────────────────────────────────
   vec.push(state.phase === 'VOTING' ? 1 : 0)
   vec.push(safeDiv(endVotes, MAX_PLAYERS))
   vec.push(safeDiv(contVotes, MAX_PLAYERS))
+  vec.push(endingFavorable)
   vec.push(Math.max(0, Math.min(1, 0.5 * endingFavorable + 0.5 * upside)))
+  vec.push(safeDiv(voteCast, MAX_PLAYERS))
+  vec.push(safeDiv(MAX_PLAYERS - voteCast, MAX_PLAYERS))
+  vec.push(state.votes[me] !== undefined ? 1 : 0)
 
-  if (vec.length !== STATE_DIM_V2) {
-    console.error(`[AI] V2 obs dim mismatch: got ${vec.length}, expected ${STATE_DIM_V2}`)
+  if (vec.length !== STATE_DIM_V3) {
+    console.error(`[AI] V3 obs dim mismatch: got ${vec.length}, expected ${STATE_DIM_V3}`)
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MASK (58 dims) — appended to obs to form the 630-dim model input
+  // MASK (58 dims) — appended to obs to form the 536-dim model input
   // ─────────────────────────────────────────────────────────────────────────
   const mask = buildActionMask(state, playerId)
   vec.push(...mask)
 
-  if (vec.length !== 630) {
-    console.error(`[AI] Final obs dim mismatch: got ${vec.length}, expected 630`)
+  if (vec.length !== 536) {
+    console.error(`[AI] Final obs dim mismatch: got ${vec.length}, expected 536`)
   }
 
   return new Float32Array(vec)
@@ -702,30 +710,25 @@ export async function getAIMove(
   const mask    = buildActionMask(state, playerId)
 
   // Build ONNX tensors
-  const obsTensor   = new ort.Tensor('float32', obsData, [1, 630])
+  const obsTensor   = new ort.Tensor('float32', new Float32Array(obsData), [1, 536])
   const styleTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(styleId)]), [1])
-
-  // DEBUG — remove after confirming
-  const legalCount = mask.filter(m => m === 1).length
-  console.log(`[AI] ${playerName} mask: ${legalCount} legal actions, ` +
-    `hand size: ${state.players[playerId].hand.length}, ` +
-    `phase: ${state.phase}, ` +
-    `currentPlayerIndex: ${state.currentPlayerIndex}, ` +
-    `playerId: ${playerId}`)
 
   // Run model
   const results = await session.run({ obs: obsTensor, style_ids: styleTensor })
-  const logits  = results['policy_logits'].data as Float32Array  // shape (1, 58)
+  const logits  = results['policy_logits'].data as Float32Array
 
-  // Apply mask: set illegal action logits to -Infinity, then argmax
-  let bestAction = ACTION_PASS
-  let bestLogit  = -Infinity
-  for (let i = 0; i < ACTION_SIZE; i++) {
-    if (mask[i] === 1 && logits[i] > bestLogit) {
-      bestLogit  = logits[i]
-      bestAction = i
+  // Apply mask in TypeScript: argmax over legal actions
+  let bestAction = -1
+  let bestScore  = -Infinity
+  for (let a = 0; a < ACTION_SIZE; a++) {
+    if (!mask[a]) continue
+    if (logits[a] > bestScore) {
+      bestScore  = logits[a]
+      bestAction = a
     }
   }
+  if (bestAction === -1) bestAction = mask.findIndex(v => v === 1)
+  if (bestAction === -1) bestAction = ACTION_PASS
 
   // Convert action integer back to AIMove
   return envActionToAIMove(bestAction, state, playerId)
